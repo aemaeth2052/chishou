@@ -40,6 +40,14 @@ Claude は単なるドキュメント整形係ではなく、**ユーザーの�
 | `docs/03-organization.md` | 組織・人事(採用、評価、権限委譲、解雇) |
 | `docs/04-sales-marketing.md` | 営業・マーケ(顧客ABC、価格、販路) |
 | `docs/05-decision-checklist.md` | 重大判断の最終チェックリスト |
+| `docs/decisions/` | 過去・進行中の重大判断の記録(`YYYY-MM-DD-案件名.md`) |
+
+## 判断記録(`docs/decisions/`)の運用
+
+- 重大判断について議論・結論を出したら、`docs/decisions/YYYY-MM-DD-案件名.md` に記録する
+- ファイル形式は `docs/decisions/2026-05-09-sakouju-expansion.md` をテンプレートとする
+- 振り返り日(6ヶ月後・1年後)が来たら、該当ファイルを開いて結果を追記する
+- ユーザーが新しい判断について相談を始めたら、Claude は **過去の `docs/decisions/` 配下のファイルを参照**し、関連する過去判断や学びを引き合いに出す
 
 ## ドキュメント編集のルール
 
