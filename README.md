@@ -12,6 +12,8 @@
 | 3 | [docs/03-organization.md](docs/03-organization.md) | 組織・人事 | 採用・評価・解雇、権限委譲 |
 | 4 | [docs/04-sales-marketing.md](docs/04-sales-marketing.md) | 営業・マーケティング | 価格、顧客選別、販路 |
 | 5 | [docs/05-decision-checklist.md](docs/05-decision-checklist.md) | 横断チェックリスト | 重大判断時の最終確認 |
+| — | [docs/meetings/](docs/meetings/) | 議事録ナレッジベース | 日々の会議を構造化して蓄積・検索 |
+| — | [docs/glossary.md](docs/glossary.md) | 用語集・固有名詞辞書 | 議事録整形時の正解データ |
 
 ## 使い方
 
