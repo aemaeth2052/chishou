@@ -3,3 +3,7 @@ config.json
 logs/
 __pycache__/
 *.pdf
+build/
+dist/
+*.zip
+*.spec.bak

@@ -23,8 +23,10 @@ from pathlib import Path
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import sync_playwright
 
+from paths import log_dir
+
 BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "logs"
+LOG_DIR = log_dir()
 
 LOGIN_URL = "https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000"
 TOP_URL = "https://www.etc-meisai.jp/"

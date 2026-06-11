@@ -25,10 +25,13 @@ except ImportError:
     _BaseWindow = tk.Tk
     HAS_TTKB = False
 
+import browser_setup
 import downloader
+from paths import config_path, migrate_old_data, user_data_dir
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "config.json"
+migrate_old_data(BASE_DIR)
+CONFIG_PATH = config_path()
 
 
 def load_config():
@@ -132,6 +135,32 @@ class App(_BaseWindow):
         self._refresh_mode()
         self._refresh_list()
         self.after(100, self.poll_log)
+        self._chromium_ready = False
+        self._ensure_browser()
+
+    # ============================================================ ブラウザ準備
+    def _ensure_browser(self):
+        """Chromium の有無を確認し、未インストールなら初回ダウンロード"""
+        self.btn_run.configure(state="disabled", text="ブラウザ確認中...")
+        self.log("ブラウザの準備状況を確認しています...")
+
+        def on_ready():
+            self._chromium_ready = True
+            self.after(0, lambda: self.btn_run.configure(
+                state="normal", text="▶ 実行" if HAS_TTKB else "実行"))
+            self.log("実行できる状態になりました")
+
+        def on_fail():
+            self.after(0, lambda: self.btn_run.configure(state="disabled", text="ブラウザ未準備"))
+            self.after(0, lambda: messagebox.showerror(
+                "ブラウザの準備に失敗しました",
+                "ブラウザ(Chromium)のダウンロードに失敗しました。\n"
+                "・インターネットに接続できているか確認してください\n"
+                "・社内プロキシで遮断されている可能性があります\n"
+                "アプリを再起動するか、管理者にご相談ください",
+            ))
+
+        browser_setup.ensure_chromium_async(log=self.log, on_ready=on_ready, on_fail=on_fail)
 
     # ============================================================ メインタブ
     def _build_main_tab(self, root):
