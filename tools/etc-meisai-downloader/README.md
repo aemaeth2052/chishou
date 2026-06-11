@@ -18,8 +18,12 @@ ETC利用照会サービス（https://www.etc-meisai.jp/）から、登録して
 
 1. [Python](https://www.python.org/downloads/) をインストール
    （インストーラーで「**Add python.exe to PATH**」にチェックを入れる）
+   ※Microsoft Store版のPythonでも動作します。
 2. このフォルダの `setup.bat` をダブルクリック
-   （仮想環境の作成・ライブラリ・ブラウザのダウンロードが自動で行われる。5分程度）
+   （ライブラリとブラウザ(Chromium)のダウンロードが自動で行われる。5分程度）
+
+> **補足:** 仮想環境(venv)は使わず、お使いのPythonに直接インストールします。
+> Microsoft Store版PythonでvenvがうまくいかないPCでも動くようにするためです。
 
 ## 使い方
 
