@@ -39,6 +39,12 @@ ETC利用照会サービス（https://www.etc-meisai.jp/）から、登録して
 名前を空欄にすると `車両27_20260601-20260611.pdf` になる。
 期間内に利用がない車両はスキップされる。
 
+## 画面テーマ
+
+UIは [ttkbootstrap](https://ttkbootstrap.readthedocs.io/) でモダンテーマ(cosmo)を適用している。
+ttkbootstrap が入っていない環境でも、標準の見た目で問題なく動作する。
+**更新後は `setup.bat` を再実行**するとライブラリが揃う。
+
 ## うまく動かないとき
 
 エラーが出ると `logs/error_日時/` フォルダに**その時の画面のスクリーンショットとHTML**が

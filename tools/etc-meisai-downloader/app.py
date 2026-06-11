@@ -13,6 +13,15 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+# ttkbootstrap があればモダンテーマを適用 (無くても従来の見た目で動く)
+try:
+    import ttkbootstrap as ttkb
+    _BaseWindow = ttkb.Window
+    HAS_TTKB = True
+except ImportError:
+    _BaseWindow = tk.Tk
+    HAS_TTKB = False
+
 import downloader
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -47,7 +56,13 @@ class VehicleRow:
         ttk.Entry(self.frame, textvariable=self.var_name, width=20).pack(side="left", padx=4)
         ttk.Label(self.frame, text="車両番号(下4桁)").pack(side="left")
         ttk.Entry(self.frame, textvariable=self.var_num, width=8).pack(side="left", padx=4)
-        ttk.Button(self.frame, text="削除", width=4, command=lambda: on_delete(self)).pack(side="left", padx=4)
+        if HAS_TTKB:
+            ttkb.Button(
+                self.frame, text="削除", width=4,
+                command=lambda: on_delete(self), bootstyle="danger-outline",
+            ).pack(side="left", padx=4)
+        else:
+            ttk.Button(self.frame, text="削除", width=4, command=lambda: on_delete(self)).pack(side="left", padx=4)
         self.frame.pack(fill="x", pady=2)
 
     def to_dict(self):
@@ -61,11 +76,15 @@ class VehicleRow:
         self.frame.destroy()
 
 
-class App(tk.Tk):
+class App(_BaseWindow):
     def __init__(self):
-        super().__init__()
+        if HAS_TTKB:
+            super().__init__(themename="cosmo")
+        else:
+            super().__init__()
         self.title("ETC利用明細ダウンローダー")
-        self.geometry("720x720")
+        self.geometry("760x760")
+        self.minsize(640, 600)
         self.log_queue = queue.Queue()
         self.running = False
         self.rows = []
@@ -97,9 +116,14 @@ class App(tk.Tk):
         box_v.pack(fill="both", expand=True, pady=4)
         toolbar = ttk.Frame(box_v)
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="車両を追加", command=self.add_row).pack(side="left")
-        ttk.Button(toolbar, text="全てチェック", command=lambda: self._set_all(True)).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="全て解除", command=lambda: self._set_all(False)).pack(side="left")
+        if HAS_TTKB:
+            ttkb.Button(toolbar, text="＋ 車両を追加", command=self.add_row, bootstyle="primary").pack(side="left")
+            ttkb.Button(toolbar, text="全てチェック", command=lambda: self._set_all(True), bootstyle="secondary-outline").pack(side="left", padx=4)
+            ttkb.Button(toolbar, text="全て解除", command=lambda: self._set_all(False), bootstyle="secondary-outline").pack(side="left")
+        else:
+            ttk.Button(toolbar, text="車両を追加", command=self.add_row).pack(side="left")
+            ttk.Button(toolbar, text="全てチェック", command=lambda: self._set_all(True)).pack(side="left", padx=4)
+            ttk.Button(toolbar, text="全て解除", command=lambda: self._set_all(False)).pack(side="left")
 
         # 車両リスト (スクロール可能エリア)
         canvas = tk.Canvas(box_v, highlightthickness=0, height=180)
@@ -143,8 +167,17 @@ class App(tk.Tk):
         box4 = ttk.Frame(outer)
         box4.pack(fill="x", pady=6)
         self.var_show = tk.BooleanVar(value=not cfg.get("headless", False))
-        ttk.Checkbutton(box4, text="ブラウザの動きを表示する(初回は表示推奨)", variable=self.var_show).pack(side="left")
-        self.btn_run = ttk.Button(box4, text="実行", command=self.on_run, width=16)
+        if HAS_TTKB:
+            ttkb.Checkbutton(
+                box4, text="ブラウザの動きを表示する(初回は表示推奨)",
+                variable=self.var_show, bootstyle="round-toggle",
+            ).pack(side="left")
+            self.btn_run = ttkb.Button(
+                box4, text="▶ 実行", command=self.on_run, width=18, bootstyle="success",
+            )
+        else:
+            ttk.Checkbutton(box4, text="ブラウザの動きを表示する(初回は表示推奨)", variable=self.var_show).pack(side="left")
+            self.btn_run = ttk.Button(box4, text="実行", command=self.on_run, width=16)
         self.btn_run.pack(side="right")
 
         # --- ログ ---
@@ -276,7 +309,7 @@ class App(tk.Tk):
 
     def on_done(self):
         self.running = False
-        self.btn_run.configure(state="normal", text="実行")
+        self.btn_run.configure(state="normal", text="▶ 実行" if HAS_TTKB else "実行")
 
 
 if __name__ == "__main__":
