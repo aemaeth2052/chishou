@@ -167,12 +167,12 @@ def _submit_search(page):
         "'/etc/R?funccode=1033000000&nextfunc=1032000000')"
     )
     page.wait_for_load_state("domcontentloaded")
-    # 検索結果画面の特徴: タイトルに「利用明細」または明細チェックボックス
+    # 検索結果画面に到達したことの確認:
+    # 明細あり → hakkoMeisai チェックボックス / 明細なし → 「ご利用はありません」
     page.wait_for_function(
-        "() => document.body.innerText.includes('利用明細') "
-        "&& (document.body.innerText.includes('該当する') "
-        "    || document.querySelector('input[name=\"hakkoMeisai\"]') "
-        "    || document.body.innerText.includes('全件'))",
+        "() => document.querySelector('input[name=\"hakkoMeisai\"]') "
+        "|| document.body.innerText.includes('ご利用はありません') "
+        "|| document.body.innerText.includes('該当する')",
         timeout=30000,
     )
 
@@ -259,7 +259,11 @@ def run(login_id, password, date_from, date_to, save_dir,
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(exist_ok=True)
-    period = f"{date_from:%Y%m%d}-{date_to:%Y%m%d}"
+    # 期間が1日のみならファイル名の日付は1回だけ書く
+    if date_from == date_to:
+        period = f"{date_from:%Y%m%d}"
+    else:
+        period = f"{date_from:%Y%m%d}-{date_to:%Y%m%d}"
     targets = list(vehicles or [])
     if not targets:
         targets = [{"name": "全車両", "number": ""}]
