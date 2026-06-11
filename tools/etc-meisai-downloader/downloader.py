@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """ETC利用照会サービス (www2.etc-meisai.jp) 利用明細PDF自動ダウンロード
 
-ログイン後の実際の画面構造 (2026-06 時点) に基づく実装:
-- メニュー「検索条件の指定」で 車両番号・期間 を設定して検索
-- 結果画面 (利用明細) で「全頁選択」→「利用明細ＰＤＦ出力」
-- PDFは form "frm" を POST して取得 (ポップアップを開かず直接ダウンロード)
+ログイン後の実画面 (2026-06 時点) に基づく実装:
+- 検索条件画面 (funccode=1033000000) のフォーム frm に値を直接セット:
+    fromYYYY, fromMM, fromDD, toYYYY, toMM, toDD  : 期間
+    sokoKbn = 1 (ETC無線走行のみ)                : 車両番号指定の前提
+    sharyoNo                                     : 車両番号(下4桁)
+  カードは全て (name=hyojiCard) チェックON
+- 「検索」ボタンの JavaScript 関数 submitKensaku() を呼んで明細画面へ
+- 明細画面 (funccode=1032000000) で全頁選択(ALLON) → 利用明細PDFをPOSTで取得
 
-車両番号のリストを順に処理し、車両ごとに1つのPDFを保存する。
-
-サイトの画面構成は予告なく変わることがある。動かなくなった場合は
-logs/error_* に保存されるスクリーンショットとHTMLを確認して修正する。
+サイトの画面構成は予告なく変わる可能性がある。動かなくなったら
+logs/error_* のスクリーンショットとHTMLを確認して修正する。
 """
 
 import base64
@@ -27,19 +29,18 @@ LOG_DIR = BASE_DIR / "logs"
 LOGIN_URL = "https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000"
 TOP_URL = "https://www.etc-meisai.jp/"
 
-# ログイン画面の部品候補 (上から順に試す)
-SELECTORS = {
-    "login_id": [
+LOGIN_SELECTORS = {
+    "id": [
         'input[name="risLoginId"]',
         'input[name="loginId"]',
         'input[type="text"][name*="ogin" i]',
     ],
-    "login_password": [
+    "pw": [
         'input[name="risPassword"]',
         'input[name="password"]',
         'input[type="password"]',
     ],
-    "login_button": [
+    "btn": [
         'role=button[name="ログイン"]',
         'input[type="submit"][value*="ログイン"]',
         'input[type="image"][alt*="ログイン"]',
@@ -52,20 +53,16 @@ class EtcMeisaiError(Exception):
     """利用者向けメッセージ付きのエラー"""
 
 
-def _find(page, key, timeout=10000):
-    """SELECTORS[key] の候補を順に試し、最初に可視になった locator を返す"""
+def _find(page, candidates, timeout=10000):
     last_err = None
-    for sel in SELECTORS[key]:
+    for sel in candidates:
         loc = page.locator(sel).first
         try:
-            loc.wait_for(state="visible", timeout=timeout // len(SELECTORS[key]) + 1500)
+            loc.wait_for(state="visible", timeout=timeout // len(candidates) + 1500)
             return loc
         except PWTimeoutError as e:
             last_err = e
-    raise EtcMeisaiError(
-        f"画面部品が見つかりません: {key}\n"
-        f"サイトの画面構成が変わった可能性があります。logs フォルダのスクリーンショットを確認してください。"
-    ) from last_err
+    raise EtcMeisaiError(f"画面部品が見つかりません: {candidates[0]}") from last_err
 
 
 def _sanitize_filename(name: str) -> str:
@@ -74,7 +71,6 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _dump(page, log, prefix="error"):
-    """画面の状態を logs/ に保存する"""
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = LOG_DIR / f"{prefix}_{stamp}"
     out.mkdir(parents=True, exist_ok=True)
@@ -96,16 +92,15 @@ def _login(page, login_id, password, log):
         page.goto(LOGIN_URL, wait_until="domcontentloaded")
     except Exception:
         page.goto(TOP_URL, wait_until="domcontentloaded")
-    # URL変更で404に飛ばされた場合は、トップページの「ログイン」リンクから入り直す
     if "お探しのページが見つかりません" in page.inner_text("body"):
         log("ログインURLが変わっているようです。トップページから入り直します...")
         page.goto(TOP_URL, wait_until="domcontentloaded")
         page.locator('#globalNav a:has-text("ログイン")').first.click()
         page.wait_for_load_state("domcontentloaded")
 
-    _find(page, "login_id").fill(login_id)
-    _find(page, "login_password").fill(password)
-    _find(page, "login_button").click()
+    _find(page, LOGIN_SELECTORS["id"]).fill(login_id)
+    _find(page, LOGIN_SELECTORS["pw"]).fill(password)
+    _find(page, LOGIN_SELECTORS["btn"]).click()
     page.wait_for_load_state("domcontentloaded")
 
     body = page.inner_text("body")
@@ -117,158 +112,69 @@ def _login(page, login_id, password, log):
 
 # ------------------------------------------------------- 検索条件の指定画面
 
-def _goto_search_page(page):
-    """メニュー「検索条件の指定」へ移動"""
+def _goto_search_form(page):
+    """メニュー「検索条件の指定」をクリックして検索条件画面へ"""
     page.locator('a:has-text("検索条件の指定")').first.click()
     page.wait_for_load_state("domcontentloaded")
+    # 検索フォームが現れるまで待つ
+    page.wait_for_selector('select[name="fromYYYY"]', timeout=15000)
 
 
-def _check_all_cards(page, log):
-    """カード選択のチェックボックスがあれば全てONにする (明細行のものは除く)"""
-    try:
-        names = page.evaluate(
-            """() => {
-                const names = new Set();
-                for (const el of document.querySelectorAll('input[type=checkbox]')) {
-                    if (el.name === 'hakkoMeisai' || !el.name) continue;
-                    const tbl = el.closest('table');
-                    if (tbl && tbl.innerText.includes('カード')) names.add(el.name);
-                }
-                return [...names];
-            }"""
-        )
-        for name in names:
-            boxes = page.locator(f'input[type="checkbox"][name="{name}"]')
-            for i in range(boxes.count()):
-                boxes.nth(i).check()
-        if names:
-            log("  カードを全選択しました")
-    except Exception:
-        log("  カード全選択はスキップしました (チェックボックスなし)")
-
-
-def _classify_date_selects(page):
-    """ページ内の <select> を年/月/日に分類し、(年,月,日) の組をDOM順に返す"""
-    sels = page.eval_on_selector_all(
-        "select",
-        """els => els.map((s, i) => ({
-            i,
-            disabled: s.disabled,
-            values: [...s.options].map(o => (o.value || o.textContent).trim()),
-        }))""",
-    )
-    classified = []
-    for s in sels:
-        nums = []
-        for v in s["values"]:
-            try:
-                nums.append(int(v))
-            except ValueError:
-                pass
-        if not nums:
-            kind = None
-        elif all(2000 <= n <= 2099 for n in nums):
-            kind = "year"
-        elif min(nums) >= 1 and max(nums) <= 12:
-            kind = "month"
-        elif min(nums) >= 1 and max(nums) <= 31 and max(nums) > 12:
-            kind = "day"
-        else:
-            kind = None
-        classified.append((s["i"], kind))
-
-    # DOM順で 年→月→日 と連続する組を拾う
-    triples = []
-    k = 0
-    while k <= len(classified) - 3:
-        kinds = [classified[k][1], classified[k + 1][1], classified[k + 2][1]]
-        if kinds == ["year", "month", "day"]:
-            triples.append((classified[k][0], classified[k + 1][0], classified[k + 2][0]))
-            k += 3
-        else:
-            k += 1
-    return triples
-
-
-def _enable_date_inputs(page, triples):
-    """日付指定のラジオボタンがある場合、日付selectが有効になるまで試す"""
-    def year_disabled():
-        idx = triples[0][0]
-        return page.locator("select").nth(idx).is_disabled()
-
-    if not year_disabled():
-        return
-    radios = page.locator('input[type="radio"]')
-    for i in range(min(radios.count(), 10)):
-        try:
-            radios.nth(i).check()
-            page.wait_for_timeout(300)
-            if not year_disabled():
-                return
-        except Exception:
-            continue
-
-
-def _select_number(page, select_index, number):
-    """select の option から数値が一致するものを選ぶ"""
-    loc = page.locator("select").nth(select_index)
-    options = loc.evaluate(
-        "s => [...s.options].map(o => ({v: o.value, t: o.textContent.trim()}))"
-    )
-    for o in options:
-        try:
-            if int(o["v"] or o["t"]) == number:
-                loc.select_option(value=o["v"])
-                return
-        except ValueError:
-            continue
-    raise EtcMeisaiError(f"日付の選択肢に {number} が見つかりません")
-
-
-def _set_dates(page, date_from, date_to):
-    triples = _classify_date_selects(page)
-    if len(triples) < 2:
-        raise EtcMeisaiError(
-            "期間指定の年月日プルダウンを特定できませんでした。"
-            "検索条件画面の構成が想定と異なります。"
-        )
-    _enable_date_inputs(page, triples)
-    for (yi, mi, di), d in zip(triples[:2], (date_from, date_to)):
-        _select_number(page, yi, d.year)
-        _select_number(page, mi, d.month)
-        _select_number(page, di, d.day)
-
-
-def _set_vehicle_number(page, number):
-    """「車両番号」ラベルの近くのテキスト入力に車両番号を入れる"""
-    name = page.evaluate(
+def _set_search_conditions(page, vehicle_no, date_from, date_to):
+    """検索条件画面のフォームに値を設定する (画面の構造に直接合わせる)"""
+    # 走行区分 = ETC無線走行のみ (これがONでないと車両番号指定が無効になる)
+    page.evaluate(
         """() => {
-            for (const el of document.querySelectorAll('input[type=text]')) {
-                const tr = el.closest('tr');
-                if (tr && tr.innerText.includes('車両番号')) return el.name;
+            for (const el of document.querySelectorAll('input[name="sokoKbn"]')) {
+                if (el.value === '1') el.click();
             }
-            return null;
         }"""
     )
-    if not name:
-        raise EtcMeisaiError("検索条件画面で「車両番号」の入力欄が見つかりませんでした。")
-    page.fill(f'input[name="{name}"]', str(number))
+    # 期間
+    for sel, val in [
+        ("fromYYYY", f"{date_from.year:04d}"),
+        ("fromMM",   f"{date_from.month:02d}"),
+        ("fromDD",   f"{date_from.day:02d}"),
+        ("toYYYY",   f"{date_to.year:04d}"),
+        ("toMM",     f"{date_to.month:02d}"),
+        ("toDD",     f"{date_to.day:02d}"),
+    ]:
+        loc = page.locator(f'select[name="{sel}"]')
+        try:
+            loc.select_option(value=val)
+        except Exception:
+            raise EtcMeisaiError(
+                f"期間の {sel}={val} を選択できませんでした。"
+                f"指定期間がサイトの選択肢の範囲外(過去62日)の可能性があります。"
+            )
+    # 車両番号
+    if vehicle_no:
+        page.fill('input[name="sharyoNo"]', str(vehicle_no))
+    else:
+        page.fill('input[name="sharyoNo"]', "")
+    # カードは全選択
+    page.evaluate(
+        """() => {
+            for (const el of document.querySelectorAll('input[name="hyojiCard"]')) el.checked = true;
+        }"""
+    )
 
 
 def _submit_search(page):
-    for sel in (
-        'input[type="button"][value*="検索"]',
-        'input[type="submit"][value*="検索"]',
-        'button:has-text("検索")',
-        'input[type="button"][value*="表示"]',
-        'a:has-text("検索する")',
-    ):
-        loc = page.locator(sel).first
-        if loc.count() and loc.is_visible():
-            loc.click()
-            page.wait_for_load_state("domcontentloaded")
-            return
-    raise EtcMeisaiError("検索条件画面の「検索」ボタンが見つかりませんでした。")
+    """検索ボタン (submitKensaku 関数) を呼ぶ"""
+    page.evaluate(
+        "() => submitKensaku('hyojiCard', 'frm', "
+        "'/etc/R?funccode=1033000000&nextfunc=1032000000')"
+    )
+    page.wait_for_load_state("domcontentloaded")
+    # 検索結果画面の特徴: タイトルに「利用明細」または明細チェックボックス
+    page.wait_for_function(
+        "() => document.body.innerText.includes('利用明細') "
+        "&& (document.body.innerText.includes('該当する') "
+        "    || document.querySelector('input[name=\"hakkoMeisai\"]') "
+        "    || document.body.innerText.includes('全件'))",
+        timeout=30000,
+    )
 
 
 # ------------------------------------------------------------- 結果→PDF保存
@@ -298,7 +204,6 @@ async (action) => {
 
 def _download_pdf(page, dest: Path, log):
     """結果画面で全頁選択し、利用明細PDFをPOSTで取得して保存する"""
-    # 明細が1件もなければスキップ
     if page.locator('input[name="hakkoMeisai"]').count() == 0:
         return False
 
@@ -310,13 +215,13 @@ def _download_pdf(page, dest: Path, log):
         link.click()
         page.wait_for_load_state("domcontentloaded")
 
-    # 「利用明細ＰＤＦ出力」のPOST先URLを onclick から取り出す
+    # 「利用明細ＰＤＦ出力」のPOST先URLを onclick から取り出す (nextfunc=1032400000)
     action = page.evaluate(
         r"""() => {
             for (const el of document.querySelectorAll('[onclick]')) {
                 const txt = (el.value || el.textContent || '');
                 if (txt.includes('明細') && /[ＰP][ＤD][ＦF]/.test(txt)) {
-                    const m = el.getAttribute('onclick').match(/'(\/etc\/R\?[^']+)'/);
+                    const m = el.getAttribute('onclick').match(/'(\/etc\/R\?[^']+1032400000[^']*)'/);
                     if (m) return m[1];
                 }
             }
@@ -345,18 +250,19 @@ def _download_pdf(page, dest: Path, log):
 # -------------------------------------------------------------------- main
 
 def run(login_id, password, date_from, date_to, save_dir,
-        vehicle_numbers=None, headless=False, log=print):
+        vehicles=None, headless=False, log=print):
     """メイン処理。GUI からスレッドで呼ばれる。
 
-    vehicle_numbers: 車両番号の文字列リスト (例: ["27", "31"])。
-                     空なら車両番号を変更せず1回だけ検索する。
+    vehicles: [{"name": "営業1号車", "number": "27"}, ...]
+              空なら車両番号指定なしで1回だけ検索する。
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(exist_ok=True)
     period = f"{date_from:%Y%m%d}-{date_to:%Y%m%d}"
-    vehicle_numbers = [str(v).strip() for v in (vehicle_numbers or []) if str(v).strip()]
-    targets = vehicle_numbers or [None]
+    targets = list(vehicles or [])
+    if not targets:
+        targets = [{"name": "全車両", "number": ""}]
     saved = []
 
     with sync_playwright() as p:
@@ -367,29 +273,26 @@ def run(login_id, password, date_from, date_to, save_dir,
         try:
             _login(page, login_id, password, log)
 
-            first = True
-            for i, vehicle in enumerate(targets, 1):
-                name = f"車両{vehicle}" if vehicle else "全車両"
-                log(f"[{i}/{len(targets)}] {name}: 検索条件を設定中 ({date_from} 〜 {date_to})")
-                _goto_search_page(page)
-                if first:
-                    # 初回のみ検索条件画面の状態を記録 (画面構成の確認用)
-                    _dump(page, lambda m: None, prefix="snapshot_search")
-                    first = False
-                _check_all_cards(page, log)
-                if vehicle:
-                    _set_vehicle_number(page, vehicle)
-                _set_dates(page, date_from, date_to)
+            for i, v in enumerate(targets, 1):
+                name = (v.get("name") or "").strip()
+                number = str(v.get("number") or "").strip()
+                label = f"{name}({number})" if name and number else (name or f"車両{number}" or "全車両")
+                log(f"[{i}/{len(targets)}] {label}: 検索条件を設定中 ({date_from} 〜 {date_to})")
+
+                _goto_search_form(page)
+                _set_search_conditions(page, number, date_from, date_to)
                 _submit_search(page)
 
-                dest = save_dir / f"{_sanitize_filename(name)}_{period}.pdf"
+                # ファイル名: 名前があれば「名前_車両番号_期間.pdf」、なければ「車両番号_期間.pdf」
+                parts = [p for p in (name, f"車両{number}" if number else "") if p]
+                stem = "_".join(_sanitize_filename(x) for x in parts) or "全車両"
+                dest = save_dir / f"{stem}_{period}.pdf"
                 if _download_pdf(page, dest, log):
                     saved.append(dest)
                     log(f"  → 保存: {dest.name}")
                 else:
                     log("  → 期間内の利用データなし。スキップします")
 
-            # ログアウト
             try:
                 page.locator('a:has-text("ログアウト")').first.click(timeout=5000)
                 log("ログアウトしました")

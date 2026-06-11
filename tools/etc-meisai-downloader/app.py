@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """ETC利用明細ダウンローダー GUI
 
-期間を指定して「実行」を押すと、ETC利用照会サービスから
-登録カード(車両)ごとの利用明細PDFを保存フォルダにダウンロードする。
+車両を登録(名前+車両番号)しておき、チェックを入れた車両だけ
+指定期間で検索して利用明細PDFをまとめてダウンロードする。
 """
 
 import datetime
@@ -34,23 +34,51 @@ def save_config(cfg):
     )
 
 
+class VehicleRow:
+    """車両1台分の入力行 (チェックボックス + 名前 + 車両番号 + 削除ボタン)"""
+
+    def __init__(self, parent, on_delete, name="", number="", enabled=True):
+        self.frame = ttk.Frame(parent)
+        self.var_on = tk.BooleanVar(value=enabled)
+        self.var_name = tk.StringVar(value=name)
+        self.var_num = tk.StringVar(value=number)
+        ttk.Checkbutton(self.frame, variable=self.var_on).pack(side="left")
+        ttk.Label(self.frame, text="名前").pack(side="left")
+        ttk.Entry(self.frame, textvariable=self.var_name, width=20).pack(side="left", padx=4)
+        ttk.Label(self.frame, text="車両番号(下4桁)").pack(side="left")
+        ttk.Entry(self.frame, textvariable=self.var_num, width=8).pack(side="left", padx=4)
+        ttk.Button(self.frame, text="削除", width=4, command=lambda: on_delete(self)).pack(side="left", padx=4)
+        self.frame.pack(fill="x", pady=2)
+
+    def to_dict(self):
+        return {
+            "enabled": self.var_on.get(),
+            "name": self.var_name.get().strip(),
+            "number": self.var_num.get().strip(),
+        }
+
+    def destroy(self):
+        self.frame.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("ETC利用明細ダウンローダー")
-        self.geometry("640x560")
+        self.geometry("720x720")
         self.log_queue = queue.Queue()
         self.running = False
+        self.rows = []
 
         cfg = load_config()
         today = datetime.date.today()
         first = today.replace(day=1)
 
-        frm = ttk.Frame(self, padding=12)
-        frm.pack(fill="both", expand=True)
+        outer = ttk.Frame(self, padding=10)
+        outer.pack(fill="both", expand=True)
 
         # --- ログイン情報 ---
-        box1 = ttk.LabelFrame(frm, text="ログイン情報 (ETC利用照会サービス)", padding=8)
+        box1 = ttk.LabelFrame(outer, text="ログイン情報 (ETC利用照会サービス)", padding=8)
         box1.pack(fill="x", pady=4)
         ttk.Label(box1, text="ユーザーID").grid(row=0, column=0, sticky="w")
         self.var_id = tk.StringVar(value=cfg.get("login_id", ""))
@@ -64,15 +92,35 @@ class App(tk.Tk):
             variable=self.var_save_pw,
         ).grid(row=2, column=0, columnspan=2, sticky="w")
 
-        # --- 車両番号 ---
-        box_v = ttk.LabelFrame(frm, text="車両番号 (カンマ区切りで複数指定。例: 27, 31, 45)", padding=8)
-        box_v.pack(fill="x", pady=4)
-        self.var_vehicles = tk.StringVar(value=cfg.get("vehicle_numbers", ""))
-        ttk.Entry(box_v, textvariable=self.var_vehicles, width=40).grid(row=0, column=0, sticky="w", padx=2)
-        ttk.Label(box_v, text="※車両番号ごとに1つのPDFを保存します").grid(row=0, column=1, sticky="w", padx=6)
+        # --- 車両一覧 ---
+        box_v = ttk.LabelFrame(outer, text="車両 (チェックしたものだけダウンロードします)", padding=8)
+        box_v.pack(fill="both", expand=True, pady=4)
+        toolbar = ttk.Frame(box_v)
+        toolbar.pack(fill="x")
+        ttk.Button(toolbar, text="車両を追加", command=self.add_row).pack(side="left")
+        ttk.Button(toolbar, text="全てチェック", command=lambda: self._set_all(True)).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="全て解除", command=lambda: self._set_all(False)).pack(side="left")
+
+        # 車両リスト (スクロール可能エリア)
+        canvas = tk.Canvas(box_v, highlightthickness=0, height=180)
+        scroll = ttk.Scrollbar(box_v, orient="vertical", command=canvas.yview)
+        self.list_frame = ttk.Frame(canvas)
+        self.list_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True, pady=4)
+        scroll.pack(side="right", fill="y")
+
+        for v in cfg.get("vehicles", []):
+            self.add_row(v.get("name", ""), v.get("number", ""), v.get("enabled", True))
+        if not self.rows:
+            self.add_row()
 
         # --- 期間 ---
-        box2 = ttk.LabelFrame(frm, text="検索期間 (YYYY/MM/DD)", padding=8)
+        box2 = ttk.LabelFrame(outer, text="検索期間 (YYYY/MM/DD ※過去62日以内)", padding=8)
         box2.pack(fill="x", pady=4)
         ttk.Label(box2, text="開始日").grid(row=0, column=0, sticky="w")
         self.var_from = tk.StringVar(value=first.strftime("%Y/%m/%d"))
@@ -85,14 +133,14 @@ class App(tk.Tk):
         ttk.Button(box2, text="昨日", command=self.set_yesterday).grid(row=0, column=6, padx=4)
 
         # --- 保存先 ---
-        box3 = ttk.LabelFrame(frm, text="PDF保存先", padding=8)
+        box3 = ttk.LabelFrame(outer, text="PDF保存先", padding=8)
         box3.pack(fill="x", pady=4)
         self.var_dir = tk.StringVar(value=cfg.get("save_dir", str(Path.home() / "Documents" / "ETC明細")))
-        ttk.Entry(box3, textvariable=self.var_dir, width=52).grid(row=0, column=0, sticky="we", padx=2)
+        ttk.Entry(box3, textvariable=self.var_dir, width=58).grid(row=0, column=0, sticky="we", padx=2)
         ttk.Button(box3, text="参照...", command=self.browse_dir).grid(row=0, column=1, padx=4)
 
         # --- オプション + 実行 ---
-        box4 = ttk.Frame(frm)
+        box4 = ttk.Frame(outer)
         box4.pack(fill="x", pady=6)
         self.var_show = tk.BooleanVar(value=not cfg.get("headless", False))
         ttk.Checkbutton(box4, text="ブラウザの動きを表示する(初回は表示推奨)", variable=self.var_show).pack(side="left")
@@ -100,10 +148,23 @@ class App(tk.Tk):
         self.btn_run.pack(side="right")
 
         # --- ログ ---
-        self.log_text = scrolledtext.ScrolledText(frm, height=14, state="disabled")
+        self.log_text = scrolledtext.ScrolledText(outer, height=12, state="disabled")
         self.log_text.pack(fill="both", expand=True, pady=4)
 
         self.after(100, self.poll_log)
+
+    # 車両リスト操作
+    def add_row(self, name="", number="", enabled=True):
+        row = VehicleRow(self.list_frame, self.delete_row, name=name, number=number, enabled=enabled)
+        self.rows.append(row)
+
+    def delete_row(self, row):
+        row.destroy()
+        self.rows.remove(row)
+
+    def _set_all(self, value):
+        for r in self.rows:
+            r.var_on.set(value)
 
     # 期間ショートカット
     def set_this_month(self):
@@ -158,6 +219,8 @@ class App(tk.Tk):
             d_to = self.parse_date(self.var_to.get(), "終了日")
             if d_from > d_to:
                 raise ValueError("開始日が終了日より後になっています")
+            if (datetime.date.today() - d_from).days > 62:
+                raise ValueError("開始日が今日から62日より前です(サイトの制約)")
             login_id = self.var_id.get().strip()
             password = self.var_pw.get()
             if not login_id or not password:
@@ -166,21 +229,31 @@ class App(tk.Tk):
             messagebox.showerror("入力エラー", str(e))
             return
 
-        import re as _re
-        vehicles = [v for v in _re.split(r"[,、，\s]+", self.var_vehicles.get()) if v]
-
+        all_vehicles = [r.to_dict() for r in self.rows]
+        # 保存(全車両分)
         cfg = {
             "login_id": login_id,
             "password": password if self.var_save_pw.get() else "",
             "save_dir": self.var_dir.get(),
             "headless": not self.var_show.get(),
-            "vehicle_numbers": self.var_vehicles.get(),
+            "vehicles": all_vehicles,
         }
         save_config(cfg)
 
+        # 実行対象: チェック済み かつ 車両番号が入っているもの
+        targets = [v for v in all_vehicles if v["enabled"] and v["number"]]
+        if not targets:
+            if not messagebox.askyesno(
+                "確認",
+                "チェック済みの車両がありません。"
+                "車両番号を指定せず全件PDFを1つ取得しますか？",
+            ):
+                return
+            targets = [{"name": "", "number": ""}]
+
         self.running = True
         self.btn_run.configure(state="disabled", text="実行中...")
-        self.log(f"=== 開始: {d_from} 〜 {d_to} ===")
+        self.log(f"=== 開始: {d_from} 〜 {d_to} / 対象 {len(targets)} 台 ===")
 
         def worker():
             try:
@@ -190,7 +263,7 @@ class App(tk.Tk):
                     date_from=d_from,
                     date_to=d_to,
                     save_dir=self.var_dir.get(),
-                    vehicle_numbers=vehicles,
+                    vehicles=targets,
                     headless=not self.var_show.get(),
                     log=self.log,
                 )
