@@ -249,12 +249,37 @@ def _download_pdf(page, dest: Path, log):
 
 # -------------------------------------------------------------------- main
 
+def _unique_path(dest: Path) -> Path:
+    """dest が存在する場合、_2, _3 ... と連番を付けた空きパスを返す"""
+    if not dest.exists():
+        return dest
+    for n in range(2, 1000):
+        cand = dest.with_name(f"{dest.stem}_{n}{dest.suffix}")
+        if not cand.exists():
+            return cand
+    raise EtcMeisaiError(f"連番の空きがありません: {dest.name}")
+
+
+def _append_history(rows):
+    """実行履歴を logs/history.csv に追記する (Excelで開ける形式)"""
+    import csv
+    LOG_DIR.mkdir(exist_ok=True)
+    path = LOG_DIR / "history.csv"
+    new_file = not path.exists()
+    with path.open("a", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        if new_file:
+            w.writerow(["実行日時", "開始日", "終了日", "所属", "車両番号", "結果", "詳細"])
+        w.writerows(rows)
+
+
 def run(login_id, password, date_from, date_to, save_dir,
-        vehicles=None, headless=False, log=print):
+        vehicles=None, headless=False, dup_mode="rename", log=print):
     """メイン処理。GUI からスレッドで呼ばれる。
 
-    vehicles: [{"name": "営業1号車", "number": "27"}, ...]
+    vehicles: [{"name": "所属", "number": "27"}, ...]
               空なら車両番号指定なしで1回だけ検索する。
+    dup_mode: 同名ファイルがあるときの動作 "overwrite" / "rename" / "skip"
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -266,47 +291,113 @@ def run(login_id, password, date_from, date_to, save_dir,
         period = f"{date_from:%Y%m%d}-{date_to:%Y%m%d}"
     targets = list(vehicles or [])
     if not targets:
-        targets = [{"name": "全車両", "number": ""}]
-    saved = []
+        targets = [{"name": "", "number": ""}]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         context = browser.new_context(locale="ja-JP")
         page = context.new_page()
         page.set_default_timeout(30000)
+
+        def process(v):
+            """1台分の処理。(status, detail) を返す。status: saved/no_data/skipped"""
+            number = str(v.get("number") or "").strip()
+            _goto_search_form(page)
+            _set_search_conditions(page, number, date_from, date_to)
+            _submit_search(page)
+
+            # ファイル名: 日付_車両ナンバー.pdf (例: 20260610_1499.pdf)
+            stem = f"{period}_{number}" if number else f"{period}_全車両"
+            dest = save_dir / f"{_sanitize_filename(stem)}.pdf"
+            if dest.exists():
+                if dup_mode == "skip":
+                    return "skipped", f"同名ファイルあり: {dest.name}"
+                if dup_mode == "rename":
+                    dest = _unique_path(dest)
+            if _download_pdf(page, dest, log):
+                return "saved", dest.name
+            return "no_data", ""
+
+        results = {}  # index -> (status, detail)
         try:
             _login(page, login_id, password, log)
 
-            for i, v in enumerate(targets, 1):
+            def label_of(v):
                 name = (v.get("name") or "").strip()
                 number = str(v.get("number") or "").strip()
-                label = f"{name}({number})" if name and number else (name or f"車両{number}" or "全車両")
-                log(f"[{i}/{len(targets)}] {label}: 検索条件を設定中 ({date_from} 〜 {date_to})")
+                return f"{name}({number})" if name and number else (name or f"車両{number}" or "全車両")
 
-                _goto_search_form(page)
-                _set_search_conditions(page, number, date_from, date_to)
-                _submit_search(page)
+            # 1巡目: 失敗しても次の車両へ進む
+            for i, v in enumerate(targets):
+                log(f"[{i + 1}/{len(targets)}] {label_of(v)}: 検索中 ({date_from} 〜 {date_to})")
+                try:
+                    status, detail = process(v)
+                    results[i] = (status, detail)
+                    msgs = {
+                        "saved": f"  → 保存: {detail}",
+                        "no_data": "  → 期間内の利用データなし",
+                        "skipped": f"  → {detail} のためスキップ",
+                    }
+                    log(msgs[status])
+                except Exception as e:
+                    results[i] = ("failed", str(e))
+                    log(f"  → 失敗: {e}")
+                    _dump(page, log, prefix="error")
 
-                # ファイル名: 日付_車両ナンバー.pdf (例: 20260610_1499.pdf)
-                stem = f"{period}_{number}" if number else f"{period}_全車両"
-                dest = save_dir / f"{_sanitize_filename(stem)}.pdf"
-                if _download_pdf(page, dest, log):
-                    saved.append(dest)
-                    log(f"  → 保存: {dest.name}")
-                else:
-                    log("  → 期間内の利用データなし。スキップします")
+            # 2巡目: 失敗した車両だけ1回リトライ
+            retry_idx = [i for i, (s, _) in results.items() if s == "failed"]
+            if retry_idx:
+                log(f"--- 失敗した {len(retry_idx)} 台をリトライします ---")
+                for i in retry_idx:
+                    v = targets[i]
+                    log(f"[リトライ] {label_of(v)}")
+                    try:
+                        status, detail = process(v)
+                        results[i] = (status, detail)
+                        log(f"  → リトライ成功: {detail or '利用データなし'}")
+                    except Exception as e:
+                        results[i] = ("failed", str(e))
+                        log(f"  → リトライも失敗: {e}")
 
             try:
                 page.locator('a:has-text("ログアウト")').first.click(timeout=5000)
                 log("ログアウトしました")
             except Exception:
-                log("ログアウトリンクが見つかりませんでした(セッションはブラウザ終了で切れます)")
-
-            log(f"完了: {len(saved)} 件のPDFを {save_dir} に保存しました")
-            return saved
+                pass
         except Exception:
+            # ログイン失敗などの全体エラー
             _dump(page, log, prefix="error")
             raise
         finally:
             context.close()
             browser.close()
+
+    # --- サマリと履歴 ---
+    counts = {"saved": 0, "no_data": 0, "skipped": 0, "failed": 0}
+    history_rows = []
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status_ja = {"saved": "保存", "no_data": "利用なし", "skipped": "スキップ", "failed": "失敗"}
+    for i, v in enumerate(targets):
+        status, detail = results.get(i, ("failed", "未処理"))
+        counts[status] += 1
+        history_rows.append([
+            now, str(date_from), str(date_to),
+            (v.get("name") or "").strip(), str(v.get("number") or "").strip(),
+            status_ja[status], detail,
+        ])
+    try:
+        _append_history(history_rows)
+    except Exception as e:
+        log(f"履歴の記録に失敗しました: {e}")
+
+    log(f"=== 完了: 保存 {counts['saved']}台 / 利用なし {counts['no_data']}台"
+        f" / スキップ {counts['skipped']}台 / 失敗 {counts['failed']}台 ===")
+    if counts["failed"]:
+        failed_labels = [
+            f"{(targets[i].get('name') or '').strip()}({targets[i].get('number')})"
+            for i, (s, _) in results.items() if s == "failed"
+        ]
+        log(f"失敗した車両: {', '.join(failed_labels)}")
+        log("時間をおいて再実行するか、logs フォルダのエラー記録を確認してください")
+    log(f"保存先: {save_dir} / 履歴: logs/history.csv")
+    return counts

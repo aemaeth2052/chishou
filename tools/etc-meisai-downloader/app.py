@@ -109,6 +109,8 @@ class App(_BaseWindow):
         self.var_to = tk.StringVar(value=today.strftime("%Y/%m/%d"))
         self.var_sort = tk.StringVar(value=cfg.get("sort", "dept"))
 
+        self.var_dup = tk.StringVar(value=cfg.get("dup_mode", "rename"))
+
         single = cfg.get("single", {})
         self.var_single_dept = tk.StringVar(value=single.get("dept", ""))
         self.var_single_num = tk.StringVar(value=single.get("number", ""))
@@ -259,6 +261,16 @@ class App(_BaseWindow):
         _btn(box3, "📂 開く", lambda: open_folder(self.var_dir.get()), style="secondary").grid(row=0, column=2, padx=2)
         box3.columnconfigure(0, weight=1)
 
+        # --- 同名ファイルの扱い ---
+        dupbox = ttk.LabelFrame(root, text="同名のPDFがすでにあるとき", padding=8)
+        dupbox.pack(fill="x", pady=4)
+        for label, val in (
+            ("連番を付けて保存 (例: 20260610_1499_2.pdf)", "rename"),
+            ("上書きする", "overwrite"),
+            ("スキップする (ダウンロードしない)", "skip"),
+        ):
+            ttk.Radiobutton(dupbox, text=label, value=val, variable=self.var_dup).pack(anchor="w")
+
         # --- 車両の新規登録 ---
         regbox = ttk.LabelFrame(root, text="車両の新規登録", padding=8)
         regbox.pack(fill="x", pady=4)
@@ -275,6 +287,17 @@ class App(_BaseWindow):
             foreground="#888",
             justify="left",
         ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+
+        # --- 車両リストの受け渡し ---
+        iobox = ttk.LabelFrame(root, text="車両リストの受け渡し (別PCへの配布用)", padding=8)
+        iobox.pack(fill="x", pady=4)
+        _btn(iobox, "📤 CSVに書き出す", self._export_vehicles, style="secondary").pack(side="left", padx=4)
+        _btn(iobox, "📥 CSVを読み込む", self._import_vehicles, style="secondary").pack(side="left", padx=4)
+        ttk.Label(
+            iobox,
+            text="形式: 1行目ヘッダ「所属,車両番号」。Excelでの編集・一括作成も可",
+            foreground="#888",
+        ).pack(side="left", padx=8)
 
         # 設定保存ボタン
         save_row = ttk.Frame(root)
@@ -372,6 +395,66 @@ class App(_BaseWindow):
         self._refresh_list()
         self.log(f"車両を登録しました: {dept} / {number}")
 
+    def _export_vehicles(self):
+        if not self.vehicles:
+            messagebox.showinfo("書き出し", "登録済みの車両がありません")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSVファイル", "*.csv")],
+            initialfile="車両リスト.csv",
+        )
+        if not path:
+            return
+        import csv
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["所属", "車両番号"])
+            for v in self.vehicles:
+                w.writerow([v.get("dept", ""), v.get("number", "")])
+        messagebox.showinfo("書き出し", f"{len(self.vehicles)} 台を書き出しました:\n{path}")
+
+    def _import_vehicles(self):
+        path = filedialog.askopenfilename(filetypes=[("CSVファイル", "*.csv")])
+        if not path:
+            return
+        import csv
+        added, skipped, bad = 0, 0, []
+        try:
+            # Excel保存のCSV(cp932)とUTF-8の両方を受け付ける
+            for enc in ("utf-8-sig", "cp932"):
+                try:
+                    with open(path, newline="", encoding=enc) as f:
+                        rows = list(csv.reader(f))
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raise ValueError("文字コードを判定できませんでした")
+        except Exception as e:
+            messagebox.showerror("読み込みエラー", str(e))
+            return
+        for lineno, row in enumerate(rows, 1):
+            if not row or not any(cell.strip() for cell in row):
+                continue
+            dept = row[0].strip()
+            number = row[1].strip() if len(row) > 1 else ""
+            if dept == "所属":  # ヘッダ行
+                continue
+            if not number.isdigit() or len(number) > 4:
+                bad.append(f"{lineno}行目: {dept},{number}")
+                continue
+            if any(v.get("number") == number and v.get("dept") == dept for v in self.vehicles):
+                skipped += 1
+                continue
+            self.vehicles.append({"enabled": True, "dept": dept, "number": number})
+            added += 1
+        self._refresh_list()
+        msg = f"追加 {added} 台 / 重複スキップ {skipped} 台"
+        if bad:
+            msg += f"\n形式エラー {len(bad)} 件:\n" + "\n".join(bad[:5])
+        messagebox.showinfo("読み込み結果", msg)
+
     def _save_now(self):
         save_config(self._current_config())
         messagebox.showinfo("保存", "設定を保存しました")
@@ -385,6 +468,7 @@ class App(_BaseWindow):
             "vehicles": self.vehicles,
             "mode": self.var_mode.get(),
             "sort": self.var_sort.get(),
+            "dup_mode": self.var_dup.get(),
             "single": {
                 "dept": self.var_single_dept.get().strip(),
                 "number": self.var_single_num.get().strip(),
@@ -487,6 +571,7 @@ class App(_BaseWindow):
                     save_dir=self.var_dir.get(),
                     vehicles=targets,
                     headless=not self.var_show.get(),
+                    dup_mode=self.var_dup.get(),
                     log=self.log,
                 )
             except Exception as e:
