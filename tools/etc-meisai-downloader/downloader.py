@@ -20,10 +20,11 @@ import re
 import unicodedata
 from pathlib import Path
 
+# paths を最初にimportして PLAYWRIGHT_BROWSERS_PATH を設定してから playwright を読み込む
+from paths import log_dir  # noqa: I001 -- order matters
+
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import sync_playwright
-
-from paths import log_dir
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = log_dir()

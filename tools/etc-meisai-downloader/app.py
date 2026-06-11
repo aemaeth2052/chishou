@@ -17,6 +17,10 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+# paths を最優先でimportして PLAYWRIGHT_BROWSERS_PATH を設定
+# (この前に playwright が読まれると環境変数が効かなくなる)
+from paths import config_path, migrate_old_data, user_data_dir  # noqa: I001
+
 try:
     import ttkbootstrap as ttkb
     _BaseWindow = ttkb.Window
@@ -27,7 +31,6 @@ except ImportError:
 
 import browser_setup
 import downloader
-from paths import config_path, migrate_old_data, user_data_dir
 
 BASE_DIR = Path(__file__).resolve().parent
 migrate_old_data(BASE_DIR)

@@ -8,7 +8,7 @@
 | 配布物の中身 | `ETC明細ダウンローダー.exe` ＋ `_internal/`（ライブラリ） |
 | 配布先 | 社内ファイルサーバーの共有フォルダ |
 | 各PCの設定保存先 | `%APPDATA%\ETC明細ダウンローダー\` |
-| 各PCのChromium | `%USERPROFILE%\AppData\Local\ms-playwright\`（初回起動時に自動DL） |
+| 各PCのChromium | `%APPDATA%\ETC明細ダウンローダー\browsers\`（初回起動時に自動DL） |
 | 各PCのPDF/履歴 | 設定で指定した保存先＋`%APPDATA%\ETC明細ダウンローダー\logs\` |
 
 設定とログは**exeとは別の場所に保存される**ので、フォルダごとの差し替え（アップデート）で設定が消えることはありません。

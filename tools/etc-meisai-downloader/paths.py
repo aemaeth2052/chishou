@@ -27,6 +27,18 @@ def user_data_dir() -> Path:
     return d
 
 
+def browsers_dir() -> Path:
+    d = user_data_dir() / "browsers"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Playwright が Chromium を探す/インストールする場所を固定する。
+# これは playwright をimportする前に環境変数で指定する必要があるため、
+# このモジュールが最初にimportされる前提で先頭で設定する。
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir())
+
+
 def config_path() -> Path:
     return user_data_dir() / "config.json"
 

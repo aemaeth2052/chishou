@@ -11,6 +11,9 @@ import subprocess
 import sys
 import threading
 
+# paths を先にimportして PLAYWRIGHT_BROWSERS_PATH を設定
+import paths  # noqa: F401 -- side effect: sets env var
+
 from playwright.sync_api import sync_playwright
 
 
@@ -47,15 +50,17 @@ def install_chromium(log=print) -> bool:
             return False
 
     try:
-        # CREATE_NO_WINDOW でコンソールを出さない (Windows)
         creationflags = 0
         if sys.platform == "win32":
             creationflags = 0x08000000  # CREATE_NO_WINDOW
+        # 現在の環境変数 (PLAYWRIGHT_BROWSERS_PATH を含む) を子プロセスに引き継ぐ
+        env = os.environ.copy()
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
             creationflags=creationflags,
+            env=env,
         )
         for line in proc.stdout:
             line = line.rstrip()
