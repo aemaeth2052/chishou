@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """ETC利用明細ダウンローダー GUI
 
-車両を登録(所属+車両番号)しておき、リストから選択 or 単一車両指定で
-指定期間の利用明細PDFをまとめてダウンロードする。
+タブ構成:
+  メイン: 検索対象 / 期間 / 実行 / ログ
+  設定  : ログイン情報 / PDF保存先 / 車両の新規登録
 """
 
 import datetime
 import json
+import os
 import queue
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -42,8 +46,19 @@ def save_config(cfg):
     )
 
 
+def open_folder(path):
+    """OSのファイラーで指定フォルダを開く"""
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        os.startfile(str(p))
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(p)])
+    else:
+        subprocess.Popen(["xdg-open", str(p)])
+
+
 def _btn(parent, text, command, style="default", **kw):
-    """ttkbootstrap があればスタイル付きボタン、無ければ標準ボタン"""
     styles = {
         "primary": "primary",
         "success": "success",
@@ -63,8 +78,8 @@ class App(_BaseWindow):
         else:
             super().__init__()
         self.title("ETC利用明細ダウンローダー")
-        self.geometry("820x860")
-        self.minsize(720, 700)
+        self.geometry("780x620")
+        self.minsize(700, 540)
         self.log_queue = queue.Queue()
         self.running = False
 
@@ -72,8 +87,7 @@ class App(_BaseWindow):
         today = datetime.date.today()
         first = today.replace(day=1)
 
-        # 登録済み車両: [{"enabled": bool, "dept": str, "number": str}]
-        # 旧バージョンの "name" キーは "dept" に移行する
+        # 旧 "name" は "dept" に移行
         self.vehicles = []
         for v in cfg.get("vehicles", []):
             self.vehicles.append({
@@ -82,179 +96,208 @@ class App(_BaseWindow):
                 "number": v.get("number", ""),
             })
 
-        outer = ttk.Frame(self, padding=10)
-        outer.pack(fill="both", expand=True)
-
-        # --- ログイン情報 ---
-        box1 = ttk.LabelFrame(outer, text="ログイン情報 (ETC利用照会サービス)", padding=8)
-        box1.pack(fill="x", pady=4)
-        ttk.Label(box1, text="ユーザーID").grid(row=0, column=0, sticky="w")
+        # 状態保持用 (タブ間で共有する変数)
         self.var_id = tk.StringVar(value=cfg.get("login_id", ""))
-        ttk.Entry(box1, textvariable=self.var_id, width=30).grid(row=0, column=1, sticky="w", padx=6)
-        ttk.Label(box1, text="パスワード").grid(row=1, column=0, sticky="w")
         self.var_pw = tk.StringVar(value=cfg.get("password", ""))
-        ttk.Entry(box1, textvariable=self.var_pw, width=30, show="*").grid(row=1, column=1, sticky="w", padx=6)
         self.var_save_pw = tk.BooleanVar(value=bool(cfg.get("password")))
-        ttk.Checkbutton(
-            box1, text="パスワードを保存する(このPC内の config.json に平文保存)",
-            variable=self.var_save_pw,
-        ).grid(row=2, column=0, columnspan=2, sticky="w")
-
-        # --- 検索対象モード ---
-        box_mode = ttk.LabelFrame(outer, text="検索対象", padding=8)
-        box_mode.pack(fill="x", pady=4)
-        self.var_mode = tk.StringVar(value=cfg.get("mode", "list"))
-        ttk.Radiobutton(
-            box_mode, text="登録済みリストから複数選択", value="list",
-            variable=self.var_mode, command=self._refresh_mode,
-        ).pack(side="left", padx=8)
-        ttk.Radiobutton(
-            box_mode, text="単一車両を指定", value="single",
-            variable=self.var_mode, command=self._refresh_mode,
-        ).pack(side="left", padx=8)
-
-        # --- リストモード: 登録済み車両 ---
-        self.box_list = ttk.LabelFrame(outer, text="登録済み車両 (チェックを入れたものを検索)", padding=8)
-        self._build_list_section(self.box_list)
-
-        # --- 単一モード: 1台指定 ---
-        self.box_single = ttk.LabelFrame(outer, text="検索する車両 (1台のみ)", padding=8)
-        self._build_single_section(self.box_single, cfg)
-
-        # --- 期間 ---
-        box2 = ttk.LabelFrame(outer, text="検索期間 (YYYY/MM/DD ※過去62日以内)", padding=8)
-        box2.pack(fill="x", pady=4)
-        ttk.Label(box2, text="開始日").grid(row=0, column=0, sticky="w")
-        self.var_from = tk.StringVar(value=first.strftime("%Y/%m/%d"))
-        ttk.Entry(box2, textvariable=self.var_from, width=14).grid(row=0, column=1, padx=6)
-        ttk.Label(box2, text="終了日").grid(row=0, column=2, sticky="w")
-        self.var_to = tk.StringVar(value=today.strftime("%Y/%m/%d"))
-        ttk.Entry(box2, textvariable=self.var_to, width=14).grid(row=0, column=3, padx=6)
-        ttk.Button(box2, text="今月", command=self.set_this_month).grid(row=0, column=4, padx=4)
-        ttk.Button(box2, text="先月", command=self.set_last_month).grid(row=0, column=5, padx=4)
-        ttk.Button(box2, text="昨日", command=self.set_yesterday).grid(row=0, column=6, padx=4)
-
-        # --- 保存先 ---
-        box3 = ttk.LabelFrame(outer, text="PDF保存先", padding=8)
-        box3.pack(fill="x", pady=4)
-        self.var_dir = tk.StringVar(value=cfg.get("save_dir", str(Path.home() / "Documents" / "ETC明細")))
-        ttk.Entry(box3, textvariable=self.var_dir, width=58).grid(row=0, column=0, sticky="we", padx=2)
-        ttk.Button(box3, text="参照...", command=self.browse_dir).grid(row=0, column=1, padx=4)
-
-        # --- 実行 ---
-        box4 = ttk.Frame(outer)
-        box4.pack(fill="x", pady=6)
+        self.var_dir = tk.StringVar(
+            value=cfg.get("save_dir", str(Path.home() / "Documents" / "ETC明細"))
+        )
         self.var_show = tk.BooleanVar(value=not cfg.get("headless", False))
-        if HAS_TTKB:
-            ttkb.Checkbutton(
-                box4, text="ブラウザの動きを表示する(初回は表示推奨)",
-                variable=self.var_show, bootstyle="round-toggle",
-            ).pack(side="left")
-        else:
-            ttk.Checkbutton(box4, text="ブラウザの動きを表示する(初回は表示推奨)", variable=self.var_show).pack(side="left")
-        self.btn_run = _btn(box4, "▶ 実行" if HAS_TTKB else "実行", self.on_run, style="success", width=18)
-        self.btn_run.pack(side="right")
+        self.var_mode = tk.StringVar(value=cfg.get("mode", "list"))
+        self.var_from = tk.StringVar(value=first.strftime("%Y/%m/%d"))
+        self.var_to = tk.StringVar(value=today.strftime("%Y/%m/%d"))
+        self.var_sort = tk.StringVar(value=cfg.get("sort", "dept"))
 
-        # --- ログ ---
-        self.log_text = scrolledtext.ScrolledText(outer, height=10, state="disabled")
-        self.log_text.pack(fill="both", expand=True, pady=4)
+        single = cfg.get("single", {})
+        self.var_single_dept = tk.StringVar(value=single.get("dept", ""))
+        self.var_single_num = tk.StringVar(value=single.get("number", ""))
+
+        self.var_reg_dept = tk.StringVar()
+        self.var_reg_num = tk.StringVar()
+
+        # ノートブック
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        self.tab_main = ttk.Frame(self.nb, padding=8)
+        self.tab_settings = ttk.Frame(self.nb, padding=8)
+        self.nb.add(self.tab_main, text="  メイン  ")
+        self.nb.add(self.tab_settings, text="  設定  ")
+
+        self._build_main_tab(self.tab_main)
+        self._build_settings_tab(self.tab_settings)
 
         self._refresh_mode()
         self._refresh_list()
         self.after(100, self.poll_log)
 
-    # ================================================== リストセクション
-    def _build_list_section(self, parent):
-        # 上段: ソートと一括操作
-        toolbar = ttk.Frame(parent)
-        toolbar.pack(fill="x")
-        ttk.Label(toolbar, text="並び順:").pack(side="left")
-        self.var_sort = tk.StringVar(value="dept")
+    # ============================================================ メインタブ
+    def _build_main_tab(self, root):
+        # --- 検索対象 (横並び、幅を抑える) ---
+        mode_row = ttk.Frame(root)
+        mode_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(mode_row, text="検索対象:").pack(side="left")
+        ttk.Radiobutton(
+            mode_row, text="登録済みリストから複数選択", value="list",
+            variable=self.var_mode, command=self._refresh_mode,
+        ).pack(side="left", padx=8)
+        ttk.Radiobutton(
+            mode_row, text="単一車両を指定", value="single",
+            variable=self.var_mode, command=self._refresh_mode,
+        ).pack(side="left", padx=4)
+
+        # 検索対象に応じた切替エリア (リスト or 単一車両)
+        self.mode_area = ttk.Frame(root)
+        self.mode_area.pack(fill="both", expand=True, pady=4)
+
+        # --- リストモード: 登録済み車両 ---
+        self.box_list = ttk.LabelFrame(self.mode_area, text="登録済み車両 (クリックで対象ON/OFF)", padding=6)
+        # ソート
+        sort_row = ttk.Frame(self.box_list)
+        sort_row.pack(fill="x")
+        ttk.Label(sort_row, text="並び順:").pack(side="left")
         for label, val in (("所属順", "dept"), ("車両番号順", "number"), ("登録順", "added")):
             ttk.Radiobutton(
-                toolbar, text=label, value=val, variable=self.var_sort,
+                sort_row, text=label, value=val, variable=self.var_sort,
                 command=self._refresh_list,
             ).pack(side="left", padx=4)
-        _btn(toolbar, "全てチェック", lambda: self._set_all(True), style="secondary").pack(side="right", padx=2)
-        _btn(toolbar, "全て解除", lambda: self._set_all(False), style="secondary").pack(side="right", padx=2)
+        _btn(sort_row, "全て解除", lambda: self._set_all(False), style="secondary").pack(side="right", padx=2)
+        _btn(sort_row, "全てチェック", lambda: self._set_all(True), style="secondary").pack(side="right", padx=2)
 
-        # 中段: Treeview で表示専用の一覧
-        tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill="both", expand=True, pady=4)
+        # Treeview
+        tree_frame = ttk.Frame(self.box_list)
+        tree_frame.pack(fill="both", expand=True, pady=(4, 4))
         cols = ("on", "dept", "number")
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8, selectmode="browse")
         self.tree.heading("on", text="対象")
         self.tree.heading("dept", text="所属")
         self.tree.heading("number", text="車両番号")
         self.tree.column("on", width=50, anchor="center", stretch=False)
-        self.tree.column("dept", width=200)
-        self.tree.column("number", width=100, anchor="center")
+        self.tree.column("dept", width=120, stretch=False)
+        self.tree.column("number", width=100, anchor="center", stretch=False)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        # 行クリックで対象チェックをトグル
         self.tree.bind("<Button-1>", self._on_tree_click)
 
-        # 下段: 削除と新規登録フォーム
-        action = ttk.Frame(parent)
-        action.pack(fill="x", pady=(4, 6))
+        # 削除のみ (新規登録は設定タブ)
+        action = ttk.Frame(self.box_list)
+        action.pack(fill="x")
         _btn(action, "選択行を削除", self._delete_selected, style="danger").pack(side="left")
         ttk.Label(
             action,
-            text="※登録内容を変更したいときは、削除してから再登録してください",
+            text="※新規登録・編集は「設定」タブから",
             foreground="#888",
         ).pack(side="left", padx=8)
 
-        regbox = ttk.LabelFrame(parent, text="新規登録", padding=6)
-        regbox.pack(fill="x")
-        ttk.Label(regbox, text="所属").grid(row=0, column=0, sticky="w")
-        self.var_reg_dept = tk.StringVar()
-        self.cb_reg_dept = ttk.Combobox(regbox, textvariable=self.var_reg_dept, width=24, values=[])
-        self.cb_reg_dept.grid(row=0, column=1, padx=4)
-        ttk.Label(regbox, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(10, 0))
-        self.var_reg_num = tk.StringVar()
-        ttk.Entry(regbox, textvariable=self.var_reg_num, width=10).grid(row=0, column=3, padx=4)
-        _btn(regbox, "＋ 登録", self._register_vehicle, style="primary").grid(row=0, column=4, padx=8)
-
-        self.box_list.pack(fill="both", expand=True, pady=4)
-
-    # ================================================== 単一モードセクション
-    def _build_single_section(self, parent, cfg):
-        single = cfg.get("single", {})
-        ttk.Label(parent, text="所属").grid(row=0, column=0, sticky="w")
-        self.var_single_dept = tk.StringVar(value=single.get("dept", ""))
-        self.cb_single_dept = ttk.Combobox(parent, textvariable=self.var_single_dept, width=24, values=[])
+        # --- 単一モード: 1台指定 ---
+        self.box_single = ttk.LabelFrame(self.mode_area, text="検索する車両 (1台のみ)", padding=8)
+        ttk.Label(self.box_single, text="所属").grid(row=0, column=0, sticky="w")
+        self.cb_single_dept = ttk.Combobox(
+            self.box_single, textvariable=self.var_single_dept, width=18, values=[])
         self.cb_single_dept.grid(row=0, column=1, padx=4)
-        ttk.Label(parent, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(10, 0))
-        self.var_single_num = tk.StringVar(value=single.get("number", ""))
-        ttk.Entry(parent, textvariable=self.var_single_num, width=10).grid(row=0, column=3, padx=4)
+        ttk.Label(self.box_single, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ttk.Entry(self.box_single, textvariable=self.var_single_num, width=10).grid(row=0, column=3, padx=4)
         ttk.Label(
-            parent,
+            self.box_single,
             text="※この1台のみ検索します。登録リストには追加されません",
             foreground="#888",
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-    # ================================================== モード切替
+        # --- 期間 ---
+        box2 = ttk.LabelFrame(root, text="検索期間 (YYYY/MM/DD ※過去62日以内)", padding=6)
+        box2.pack(fill="x", pady=4)
+        ttk.Label(box2, text="開始").grid(row=0, column=0, sticky="w")
+        ttk.Entry(box2, textvariable=self.var_from, width=12).grid(row=0, column=1, padx=4)
+        ttk.Label(box2, text="〜 終了").grid(row=0, column=2, sticky="w")
+        ttk.Entry(box2, textvariable=self.var_to, width=12).grid(row=0, column=3, padx=4)
+        ttk.Button(box2, text="今月", command=self.set_this_month, width=5).grid(row=0, column=4, padx=2)
+        ttk.Button(box2, text="先月", command=self.set_last_month, width=5).grid(row=0, column=5, padx=2)
+        ttk.Button(box2, text="昨日", command=self.set_yesterday, width=5).grid(row=0, column=6, padx=2)
+
+        # --- 実行 ---
+        runrow = ttk.Frame(root)
+        runrow.pack(fill="x", pady=6)
+        if HAS_TTKB:
+            ttkb.Checkbutton(
+                runrow, text="ブラウザの動きを表示する",
+                variable=self.var_show, bootstyle="round-toggle",
+            ).pack(side="left")
+        else:
+            ttk.Checkbutton(
+                runrow, text="ブラウザの動きを表示する",
+                variable=self.var_show,
+            ).pack(side="left")
+        self.btn_run = _btn(runrow, "▶ 実行" if HAS_TTKB else "実行", self.on_run, style="success", width=14)
+        self.btn_run.pack(side="right", padx=4)
+        _btn(runrow, "📂 保存先を開く", lambda: open_folder(self.var_dir.get()), style="secondary").pack(side="right", padx=4)
+
+        # --- ログ ---
+        self.log_text = scrolledtext.ScrolledText(root, height=8, state="disabled")
+        self.log_text.pack(fill="both", expand=True, pady=(4, 0))
+
+    # =========================================================== 設定タブ
+    def _build_settings_tab(self, root):
+        # --- ログイン情報 ---
+        box1 = ttk.LabelFrame(root, text="ログイン情報 (ETC利用照会サービス)", padding=8)
+        box1.pack(fill="x", pady=4)
+        ttk.Label(box1, text="ユーザーID").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(box1, textvariable=self.var_id, width=30).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(box1, text="パスワード").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(box1, textvariable=self.var_pw, width=30, show="*").grid(row=1, column=1, sticky="w", padx=6)
+        ttk.Checkbutton(
+            box1, text="パスワードを保存する (config.json に平文保存)",
+            variable=self.var_save_pw,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # --- PDF保存先 ---
+        box3 = ttk.LabelFrame(root, text="PDF保存先", padding=8)
+        box3.pack(fill="x", pady=4)
+        ttk.Entry(box3, textvariable=self.var_dir, width=58).grid(row=0, column=0, sticky="we", padx=2)
+        ttk.Button(box3, text="参照...", command=self.browse_dir).grid(row=0, column=1, padx=4)
+        _btn(box3, "📂 開く", lambda: open_folder(self.var_dir.get()), style="secondary").grid(row=0, column=2, padx=2)
+        box3.columnconfigure(0, weight=1)
+
+        # --- 車両の新規登録 ---
+        regbox = ttk.LabelFrame(root, text="車両の新規登録", padding=8)
+        regbox.pack(fill="x", pady=4)
+        ttk.Label(regbox, text="所属").grid(row=0, column=0, sticky="w")
+        self.cb_reg_dept = ttk.Combobox(regbox, textvariable=self.var_reg_dept, width=18, values=[])
+        self.cb_reg_dept.grid(row=0, column=1, padx=4)
+        ttk.Label(regbox, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ttk.Entry(regbox, textvariable=self.var_reg_num, width=10).grid(row=0, column=3, padx=4)
+        _btn(regbox, "＋ 登録", self._register_vehicle, style="primary").grid(row=0, column=4, padx=8)
+        ttk.Label(
+            regbox,
+            text="※登録した車両は「メイン」タブの一覧に表示されます。\n"
+                 "  変更したいときは一覧から削除してから再登録してください。",
+            foreground="#888",
+            justify="left",
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+
+        # 設定保存ボタン
+        save_row = ttk.Frame(root)
+        save_row.pack(fill="x", pady=8)
+        _btn(save_row, "💾 設定を保存", self._save_now, style="primary").pack(side="right")
+
+    # ============================================================ 共通処理
     def _refresh_mode(self):
         if self.var_mode.get() == "list":
-            self.box_single.forget()
-            self.box_list.pack(fill="both", expand=True, pady=4)
+            self.box_single.pack_forget()
+            self.box_list.pack(in_=self.mode_area, fill="both", expand=True)
         else:
-            self.box_list.forget()
-            self.box_single.pack(fill="x", pady=4)
-            # 所属候補を反映
-            self.cb_single_dept["values"] = sorted({v["dept"] for v in self.vehicles if v.get("dept")})
+            self.box_list.pack_forget()
+            self.box_single.pack(in_=self.mode_area, fill="x")
+            self.cb_single_dept["values"] = self._depts()
 
-    # ================================================== リスト操作
     def _depts(self):
         return sorted({v["dept"] for v in self.vehicles if v.get("dept")})
 
     def _refresh_list(self):
-        # ソート
         key = self.var_sort.get()
         if key == "dept":
-            self._display_order = sorted(
+            order = sorted(
                 range(len(self.vehicles)),
                 key=lambda i: (self.vehicles[i].get("dept", ""), self.vehicles[i].get("number", "")),
             )
@@ -265,20 +308,20 @@ class App(_BaseWindow):
                     return (0, int(n))
                 except ValueError:
                     return (1, n)
-            self._display_order = sorted(range(len(self.vehicles)), key=num_key)
+            order = sorted(range(len(self.vehicles)), key=num_key)
         else:
-            self._display_order = list(range(len(self.vehicles)))
+            order = list(range(len(self.vehicles)))
 
-        # 描画
-        self.tree.delete(*self.tree.get_children())
-        for idx in self._display_order:
-            v = self.vehicles[idx]
-            mark = "☑" if v.get("enabled", True) else "☐"
-            self.tree.insert("", "end", iid=str(idx), values=(mark, v.get("dept", ""), v.get("number", "")))
+        if hasattr(self, "tree"):
+            self.tree.delete(*self.tree.get_children())
+            for idx in order:
+                v = self.vehicles[idx]
+                mark = "☑" if v.get("enabled", True) else "☐"
+                self.tree.insert("", "end", iid=str(idx), values=(mark, v.get("dept", ""), v.get("number", "")))
 
-        # 所属候補を最新化
         depts = self._depts()
-        self.cb_reg_dept["values"] = depts
+        if hasattr(self, "cb_reg_dept"):
+            self.cb_reg_dept["values"] = depts
         if hasattr(self, "cb_single_dept"):
             self.cb_single_dept["values"] = depts
 
@@ -327,8 +370,28 @@ class App(_BaseWindow):
         self.var_reg_dept.set("")
         self.var_reg_num.set("")
         self._refresh_list()
+        self.log(f"車両を登録しました: {dept} / {number}")
 
-    # ================================================== 期間ショートカット
+    def _save_now(self):
+        save_config(self._current_config())
+        messagebox.showinfo("保存", "設定を保存しました")
+
+    def _current_config(self):
+        return {
+            "login_id": self.var_id.get().strip(),
+            "password": self.var_pw.get() if self.var_save_pw.get() else "",
+            "save_dir": self.var_dir.get(),
+            "headless": not self.var_show.get(),
+            "vehicles": self.vehicles,
+            "mode": self.var_mode.get(),
+            "sort": self.var_sort.get(),
+            "single": {
+                "dept": self.var_single_dept.get().strip(),
+                "number": self.var_single_num.get().strip(),
+            },
+        }
+
+    # 期間ショートカット
     def set_this_month(self):
         today = datetime.date.today()
         self.var_from.set(today.replace(day=1).strftime("%Y/%m/%d"))
@@ -350,7 +413,6 @@ class App(_BaseWindow):
         if d:
             self.var_dir.set(d)
 
-    # ================================================== ログ
     def log(self, msg):
         self.log_queue.put(msg)
 
@@ -374,7 +436,6 @@ class App(_BaseWindow):
                 continue
         raise ValueError(f"{label}の日付形式が不正です: {s} (例: 2026/06/01)")
 
-    # ================================================== 実行
     def on_run(self):
         if self.running:
             return
@@ -388,7 +449,7 @@ class App(_BaseWindow):
             login_id = self.var_id.get().strip()
             password = self.var_pw.get()
             if not login_id or not password:
-                raise ValueError("ユーザーIDとパスワードを入力してください")
+                raise ValueError("ユーザーIDとパスワードを「設定」タブで入力してください")
 
             mode = self.var_mode.get()
             if mode == "single":
@@ -410,20 +471,7 @@ class App(_BaseWindow):
             messagebox.showerror("入力エラー", str(e))
             return
 
-        # 保存
-        cfg = {
-            "login_id": login_id,
-            "password": password if self.var_save_pw.get() else "",
-            "save_dir": self.var_dir.get(),
-            "headless": not self.var_show.get(),
-            "vehicles": self.vehicles,
-            "mode": mode,
-            "single": {
-                "dept": self.var_single_dept.get().strip(),
-                "number": self.var_single_num.get().strip(),
-            },
-        }
-        save_config(cfg)
+        save_config(self._current_config())
 
         self.running = True
         self.btn_run.configure(state="disabled", text="実行中...")
