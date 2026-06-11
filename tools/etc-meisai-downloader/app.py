@@ -64,6 +64,13 @@ class App(tk.Tk):
             variable=self.var_save_pw,
         ).grid(row=2, column=0, columnspan=2, sticky="w")
 
+        # --- 車両番号 ---
+        box_v = ttk.LabelFrame(frm, text="車両番号 (カンマ区切りで複数指定。例: 27, 31, 45)", padding=8)
+        box_v.pack(fill="x", pady=4)
+        self.var_vehicles = tk.StringVar(value=cfg.get("vehicle_numbers", ""))
+        ttk.Entry(box_v, textvariable=self.var_vehicles, width=40).grid(row=0, column=0, sticky="w", padx=2)
+        ttk.Label(box_v, text="※車両番号ごとに1つのPDFを保存します").grid(row=0, column=1, sticky="w", padx=6)
+
         # --- 期間 ---
         box2 = ttk.LabelFrame(frm, text="検索期間 (YYYY/MM/DD)", padding=8)
         box2.pack(fill="x", pady=4)
@@ -159,11 +166,15 @@ class App(tk.Tk):
             messagebox.showerror("入力エラー", str(e))
             return
 
+        import re as _re
+        vehicles = [v for v in _re.split(r"[,、，\s]+", self.var_vehicles.get()) if v]
+
         cfg = {
             "login_id": login_id,
             "password": password if self.var_save_pw.get() else "",
             "save_dir": self.var_dir.get(),
             "headless": not self.var_show.get(),
+            "vehicle_numbers": self.var_vehicles.get(),
         }
         save_config(cfg)
 
@@ -179,6 +190,7 @@ class App(tk.Tk):
                     date_from=d_from,
                     date_to=d_to,
                     save_dir=self.var_dir.get(),
+                    vehicle_numbers=vehicles,
                     headless=not self.var_show.get(),
                     log=self.log,
                 )
