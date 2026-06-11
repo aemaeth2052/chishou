@@ -22,7 +22,7 @@ from playwright.sync_api import sync_playwright
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 
-LOGIN_URL = "https://www.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000"
+LOGIN_URL = "https://www2.etc-meisai.jp/etc/R?funccode=1013000000&nextfunc=1013000000"
 TOP_URL = "https://www.etc-meisai.jp/"
 
 # 画面部品の候補。上から順に試して最初に見つかったものを使う。
@@ -171,6 +171,13 @@ def run(login_id, password, date_from, date_to, save_dir, headless=False, log=pr
                 page.goto(LOGIN_URL, wait_until="domcontentloaded")
             except Exception:
                 page.goto(TOP_URL, wait_until="domcontentloaded")
+            # URL変更で404に飛ばされた場合は、トップページの「ログイン」リンクから入り直す
+            if "お探しのページが見つかりません" in (page.title() or "") or \
+               "お探しのページが見つかりません" in page.inner_text("body"):
+                log("ログインURLが変わっているようです。トップページから入り直します...")
+                page.goto(TOP_URL, wait_until="domcontentloaded")
+                page.locator('#globalNav a:has-text("ログイン")').first.click()
+                page.wait_for_load_state("domcontentloaded")
             _find(page, "login_id").fill(login_id)
             _find(page, "login_password").fill(password)
             _find(page, "login_button").click()
