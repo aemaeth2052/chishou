@@ -287,10 +287,9 @@ def run(login_id, password, date_from, date_to, save_dir,
                 _set_search_conditions(page, number, date_from, date_to)
                 _submit_search(page)
 
-                # ファイル名: 名前があれば「名前_車両番号_期間.pdf」、なければ「車両番号_期間.pdf」
-                parts = [p for p in (name, f"車両{number}" if number else "") if p]
-                stem = "_".join(_sanitize_filename(x) for x in parts) or "全車両"
-                dest = save_dir / f"{stem}_{period}.pdf"
+                # ファイル名: 日付_車両ナンバー.pdf (例: 20260610_1499.pdf)
+                stem = f"{period}_{number}" if number else f"{period}_全車両"
+                dest = save_dir / f"{_sanitize_filename(stem)}.pdf"
                 if _download_pdf(page, dest, log):
                     saved.append(dest)
                     log(f"  → 保存: {dest.name}")
