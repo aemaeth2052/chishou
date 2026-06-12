@@ -77,13 +77,24 @@ def _dump(page, log, prefix="error"):
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = LOG_DIR / f"{prefix}_{stamp}"
     out.mkdir(parents=True, exist_ok=True)
+    saved_any = False
+    try:
+        (out / "url.txt").write_text(page.url, encoding="utf-8")
+        saved_any = True
+    except Exception:
+        pass
     try:
         page.screenshot(path=str(out / "screenshot.png"), full_page=True)
-        (out / "page.html").write_text(page.content(), encoding="utf-8")
-        (out / "url.txt").write_text(page.url, encoding="utf-8")
-        log(f"画面の状態を保存しました: {out}")
+        saved_any = True
     except Exception:
-        log("画面の保存に失敗しました")
+        pass
+    try:
+        (out / "page.html").write_text(page.content(), encoding="utf-8")
+        saved_any = True
+    except Exception:
+        pass
+    log(f"画面の状態を保存しました: {out}" if saved_any
+        else f"画面の保存に失敗しました (フォルダのみ作成: {out})")
     return out
 
 
@@ -115,11 +126,21 @@ def _login(page, login_id, password, log):
 
 # ------------------------------------------------------- 検索条件の指定画面
 
+SEARCH_FORM_URL = (
+    "https://www2.etc-meisai.jp/etc/R"
+    "?funccode=1033000000&nextfunc=1033000000"
+)
+
+
 def _goto_search_form(page):
-    """メニュー「検索条件の指定」をクリックして検索条件画面へ"""
-    page.locator('a:has-text("検索条件の指定")').first.click()
-    page.wait_for_load_state("domcontentloaded")
-    # 検索フォームが現れるまで待つ
+    """検索条件画面へ移動。メニューが見つからなければURL直叩きでフォールバック"""
+    try:
+        link = page.locator('a:has-text("検索条件の指定")').first
+        link.wait_for(state="visible", timeout=4000)
+        link.click()
+        page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        page.goto(SEARCH_FORM_URL, wait_until="domcontentloaded")
     page.wait_for_selector('select[name="fromYYYY"]', timeout=15000)
 
 
@@ -170,12 +191,15 @@ def _submit_search(page):
         "'/etc/R?funccode=1033000000&nextfunc=1032000000')"
     )
     page.wait_for_load_state("domcontentloaded")
-    # 検索結果画面に到達したことの確認:
-    # 明細あり → hakkoMeisai チェックボックス / 明細なし → 「ご利用はありません」
+    # 検索結果画面に到達したことの確認 (body が null の瞬間を避ける):
     page.wait_for_function(
-        "() => document.querySelector('input[name=\"hakkoMeisai\"]') "
-        "|| document.body.innerText.includes('ご利用はありません') "
-        "|| document.body.innerText.includes('該当する')",
+        """() => {
+            const b = document.body;
+            if (!b) return false;
+            if (document.querySelector('input[name="hakkoMeisai"]')) return true;
+            const t = b.innerText || '';
+            return t.includes('ご利用はありません') || t.includes('該当する');
+        }""",
         timeout=30000,
     )
 
