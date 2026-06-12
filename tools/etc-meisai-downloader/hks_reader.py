@@ -1,0 +1,264 @@
+# -*- coding: utf-8 -*-
+"""Hks「番割予定表」(WPF) 読み取りモジュール
+
+UI Automation 経由で番割予定表ウィンドウを読み、
+顧客→現場→車両→作業員 の構造を取り出す。
+
+画面構造 (2026-06 時点、実物のツリーダンプに基づく):
+  Window > Pane > [Text 顧客名][Custom 現場ブロック]... の繰り返し
+  現場ブロック内:
+    Text  : (先頭の番号) / 現場名 / 出X:XX / 交通手段(車・電等)
+    Custom: 左側 = 車両・フラグ(￥地書/ETC/携帯) / 右側 = 作業員
+    Text  : 作業内容 / 住所
+
+車両欄の先頭数字が ETC利用照会の車両番号(下4桁)に対応する。
+  例) '軽27-④'→27, '1606ハイ'→1606, '1499'→1499, '7772・Caravan'→7772
+"""
+
+import re
+import sys
+from pathlib import Path
+
+OUT = Path(__file__).resolve().parent / "hks_records.txt"
+
+TRANSPORTS = {"車", "電", "迎", "送迎", "同乗", "自家用車", "徒歩", "送り"}
+FLAG_CHARS = set("￥地書他注")
+# 顧客カードではないセクション見出し
+NON_CUSTOMER = {"待機", "休み/留守", "休み", "留守"}
+
+
+def find_schedule_window():
+    """番割予定表ウィンドウ(pywinautoラッパー)を返す。無ければ None"""
+    from pywinauto import Desktop
+    for w in Desktop(backend="uia").windows():
+        try:
+            if "予定表" in w.window_text():
+                return w
+        except Exception:
+            continue
+    return None
+
+
+def _snap(ctrl):
+    """コントロールを軽量な辞書ツリーに変換 (UIA往復を1回で済ませる)"""
+    try:
+        ct = ctrl.element_info.control_type
+    except Exception:
+        ct = ""
+    try:
+        txt = ctrl.window_text() or ""
+    except Exception:
+        txt = ""
+    try:
+        r = ctrl.rectangle()
+        rect = (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        rect = (0, 0, 0, 0)
+    kids = []
+    try:
+        for k in ctrl.children():
+            kids.append(_snap(k))
+    except Exception:
+        pass
+    return {"ct": ct, "text": txt, "rect": rect, "children": kids}
+
+
+def is_vehicle(text: str) -> bool:
+    """車両欄テキストが実車両か (電車パス・電話・フラグを除く)"""
+    t = text.strip()
+    if not t:
+        return False
+    if all(c in FLAG_CHARS for c in t):
+        return False
+    if "携帯" in t or t.startswith("ETC"):
+        return False
+    # 数字始まり or 軽(軽自動車)始まり を車両とみなす
+    return bool(re.match(r"^[0-9]", t) or t.startswith("軽"))
+
+
+def vehicle_number(text: str) -> str:
+    """車両欄テキストから ETC車両番号(下4桁)に対応する数字を取り出す"""
+    m = re.search(r"\d+", text)
+    return m.group() if m else ""
+
+
+def _fields_of(block):
+    kids = block["children"]
+    if len(kids) == 1 and kids[0]["ct"] == "Custom":
+        return kids[0]["children"]
+    return kids
+
+
+def _parse_block(block, customer):
+    fields = _fields_of(block)
+    bl, _, br, _ = block["rect"]
+    mid_x = (bl + br) / 2
+
+    plain = []        # (text, rect)
+    left_items = []   # {"texts":[...], "rect":...}
+    right_items = []
+    for f in fields:
+        if f["ct"] == "Custom":
+            subs = [c["text"].strip() for c in f["children"] if c["text"].strip()]
+            cx = (f["rect"][0] + f["rect"][2]) / 2
+            item = {"texts": subs, "rect": f["rect"]}
+            if cx <= mid_x:
+                left_items.append(item)
+            else:
+                right_items.append(item)
+        elif f["ct"] == "Text":
+            t = f["text"].strip()
+            if t:
+                plain.append((t, f["rect"]))
+
+    # 車両 / ETCラベル
+    vehicle_raw = ""
+    etc_label = ""
+    for it in left_items:
+        joined = "".join(it["texts"])
+        if joined.startswith("ETC") and not etc_label:
+            etc_label = joined
+        if not vehicle_raw and is_vehicle(joined):
+            vehicle_raw = joined
+
+    # 作業員 (右側Customの名前。●★や所属プレフィックスを除去)
+    workers = []
+    for it in right_items:
+        if it["texts"]:
+            name = it["texts"][-1].lstrip("●★☆◎").strip()
+            if name:
+                workers.append(name)
+
+    # 現場名 / 出発 / 交通手段
+    site = ""
+    departure = ""
+    transport = ""
+    for t, _ in plain:
+        if t in TRANSPORTS and not transport:
+            transport = t
+    for t, _ in plain:
+        if re.match(r"^[▲△]?出\s*\d", t) and not departure:
+            departure = re.sub(r"^[▲△]", "", t)
+    for t, _ in plain:
+        if re.match(r"^\d+$", t):           # 先頭の通し番号
+            continue
+        if re.match(r"^[▲△]?出\s*\d", t):    # 出発時刻
+            continue
+        if t in TRANSPORTS or t in FLAG_CHARS:
+            continue
+        site = t
+        break
+
+    # 住所 (best-effort)
+    address = ""
+    for t, _ in plain:
+        if "住所" in t or re.search(r"(東京都|千葉県|神奈川県|埼玉県|茨城県|栃木県|群馬県|山梨県)", t):
+            address = t.replace("\\n", " / ")
+
+    return {
+        "customer": customer,
+        "site": site,
+        "vehicle_raw": vehicle_raw,
+        "vehicle_no": vehicle_number(vehicle_raw),
+        "etc_label": etc_label,
+        "departure": departure,
+        "transport": transport,
+        "workers": workers,
+        "address": address,
+    }
+
+
+def read_schedule(log=print):
+    """番割予定表を読み、現場レコードのリストを返す。
+
+    各レコード: {customer, site, vehicle_raw, vehicle_no, etc_label,
+                departure, transport, workers, address}
+    車両が特定できたレコードのみ返す。
+    """
+    win = find_schedule_window()
+    if win is None:
+        raise RuntimeError(
+            "番割予定表ウィンドウが見つかりません。Hksで番割予定表を表示してください。"
+        )
+    # Pane (カードの器) を取得
+    pane = None
+    for c in win.children():
+        try:
+            if c.element_info.control_type == "Pane":
+                pane = c
+                break
+        except Exception:
+            continue
+    if pane is None:
+        raise RuntimeError("予定表のカード領域(Pane)が見つかりませんでした。")
+
+    log("番割予定表を読み取っています...")
+    root = _snap(pane)
+
+    records = []
+    current_customer = None
+    for child in root["children"]:
+        if child["ct"] == "Text":
+            t = child["text"].strip()
+            if t and t not in NON_CUSTOMER:
+                current_customer = t
+            elif t in NON_CUSTOMER:
+                current_customer = None   # 待機/休み セクションに入った
+        elif child["ct"] == "Custom" and current_customer:
+            rec = _parse_block(child, current_customer)
+            # 車両が取れたものだけ採用 (待機・休み・電車のみは除外)
+            if rec["vehicle_no"]:
+                records.append(rec)
+    log(f"読み取り完了: {len(records)} 件の車両割当を取得")
+    return records
+
+
+def build_vehicle_map(records):
+    """車両番号 -> [レコード...] の辞書 (ETC明細との突き合わせ用)"""
+    m = {}
+    for r in records:
+        m.setdefault(r["vehicle_no"], []).append(r)
+    return m
+
+
+# ---------------------------------------------------------- 単体テスト用
+def _main():
+    try:
+        records = read_schedule()
+    except Exception as e:
+        msg = f"エラー: {e}"
+        print(msg)
+        OUT.write_text(msg, encoding="utf-8")
+        sys.exit(1)
+
+    lines = []
+
+    def w(s=""):
+        print(s)
+        lines.append(str(s))
+
+    w("=" * 70)
+    w(f"番割予定表 読み取り結果: {len(records)} 件")
+    w("=" * 70)
+    w(f"{'車両':<8}{'顧客':<22}{'現場':<28}作業員")
+    w("-" * 70)
+    for r in sorted(records, key=lambda x: (x["vehicle_no"].zfill(4))):
+        workers = "、".join(r["workers"][:4])
+        w(f"{r['vehicle_no']:<8}{r['customer'][:20]:<22}{r['site'][:26]:<28}{workers}")
+
+    # 車両番号の重複チェック
+    vm = build_vehicle_map(records)
+    dups = {k: v for k, v in vm.items() if len(v) > 1}
+    if dups:
+        w("")
+        w("【注意】同じ車両番号が複数の現場に出ています:")
+        for num, recs in sorted(dups.items()):
+            sites = " / ".join(f"{x['customer']}:{x['site']}" for x in recs)
+            w(f"  車両{num}: {sites}")
+
+    OUT.write_text("\n".join(lines), encoding="utf-8")
+    print(f"\n結果を保存しました: {OUT}")
+
+
+if __name__ == "__main__":
+    _main()
