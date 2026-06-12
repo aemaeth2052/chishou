@@ -31,6 +31,21 @@ NON_CUSTOMER = {"待機", "休み/留守", "休み", "留守"}
 _LEAD_MARK_RE = re.compile(r"^[●★☆◎▲△◆◇■□]+\s*")
 _LEAD_BRACKET_RE = re.compile(r"^[\[【［][^\]】］]*[\]】］]\s*")
 
+# 株式会社/有限会社 と社名の間は半角スペース1つに統一
+_COMPANY_KW = ("株式会社", "有限会社", "合同会社", "合資会社", "合名会社")
+
+
+def _normalize_company_spacing(s: str) -> str:
+    """株式会社/有限会社 と隣接する社名との間の空白を半角スペース1つに揃える。
+    ㈱などの省略表記には触らない。
+    """
+    for kw in _COMPANY_KW:
+        # 社名の後ろに付く場合: ○○株式会社 / ○○　株式会社 → ○○ 株式会社
+        s = re.sub(rf"(\S)[\s　]*{kw}", rf"\1 {kw}", s)
+        # 社名の前に付く場合: 株式会社○○ / 株式会社　○○ → 株式会社 ○○
+        s = re.sub(rf"{kw}[\s　]*(\S)", rf"{kw} \1", s)
+    return s
+
 
 def _strip_lead_marks(text: str) -> str:
     """先頭の装飾(●など)を除去"""
@@ -38,7 +53,8 @@ def _strip_lead_marks(text: str) -> str:
 
 
 def _clean_customer(text: str) -> str:
-    """顧客名: 先頭の角カッコ ([若松] [下建] 等) と装飾記号を除去"""
+    """顧客名: 先頭の角カッコ ([若松] [下建] 等) と装飾記号を除去し、
+    株式会社等の前後の空白を半角スペース1つに統一する"""
     s = text.strip()
     while True:
         prev = s
@@ -46,7 +62,7 @@ def _clean_customer(text: str) -> str:
         s = _LEAD_MARK_RE.sub("", s)
         if s == prev:
             break
-    return s
+    return _normalize_company_spacing(s)
 
 
 def find_schedule_windows():

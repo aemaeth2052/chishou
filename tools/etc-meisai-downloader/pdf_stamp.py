@@ -12,9 +12,9 @@ import io
 from pathlib import Path
 
 FONT_NAME = "HeiseiKakuGo-W5"
-FONT_SIZE = 9
-X_MM = 18      # 左端からの位置
-Y_MM = 21      # 下端からの位置 (フッターロゴの上)
+FONT_SIZE = 27     # 9pt の3倍
+X_MM = 18          # 左端からの位置
+Y_MM = 30          # 下端からの位置 (フッターロゴの上)
 
 
 def build_label(info: dict, opts: dict) -> str:
