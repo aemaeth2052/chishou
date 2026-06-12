@@ -12,6 +12,8 @@ block_cipher = None
 hiddenimports = (
     collect_submodules("ttkbootstrap")
     + collect_submodules("playwright")
+    + collect_submodules("pywinauto")
+    + collect_submodules("comtypes")
 )
 
 datas = collect_data_files("ttkbootstrap") + collect_data_files("playwright")

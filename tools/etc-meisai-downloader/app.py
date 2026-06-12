@@ -124,6 +124,12 @@ class App(_BaseWindow):
         self.var_reg_dept = tk.StringVar()
         self.var_reg_num = tk.StringVar()
 
+        # Hks番割から取り込んだ {車両番号: {"customer","site"}} (config から復元)
+        self.hks_map = cfg.get("hks_map", {}) or {}
+        self.hks_imported_at = cfg.get("hks_imported_at", "")
+        self.var_hks_status = tk.StringVar()
+        self._update_hks_status()
+
         # ノートブック
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 4))
@@ -238,6 +244,13 @@ class App(_BaseWindow):
             text="※この1台のみ検索します。登録リストには追加されません",
             foreground="#888",
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        # --- Hks番割の取込 (PDF名と按分レポートに顧客・現場を反映) ---
+        hks_row = ttk.Frame(root)
+        hks_row.pack(fill="x", pady=(0, 4))
+        self.btn_hks = _btn(hks_row, "Hks番割から取込", self.on_import_hks, style="secondary")
+        self.btn_hks.pack(side="left")
+        ttk.Label(hks_row, textvariable=self.var_hks_status, foreground="#888").pack(side="left", padx=8)
 
         # --- 期間 ---
         box2 = ttk.LabelFrame(root, text="検索期間 (YYYY/MM/DD ※過去62日以内)", padding=6)
@@ -487,6 +500,51 @@ class App(_BaseWindow):
             msg += f"\n形式エラー {len(bad)} 件:\n" + "\n".join(bad[:5])
         messagebox.showinfo("読み込み結果", msg)
 
+    # ============================================================ Hks取込
+    def _update_hks_status(self):
+        if self.hks_map:
+            self.var_hks_status.set(
+                f"取込済: {len(self.hks_map)}台 ({self.hks_imported_at})"
+                " ※PDF名と按分レポートに顧客・現場を付けます"
+            )
+        else:
+            self.var_hks_status.set("未取込 (Hksの番割予定表を開いた状態で押してください)")
+
+    def on_import_hks(self):
+        self.btn_hks.configure(state="disabled")
+
+        def worker():
+            try:
+                try:
+                    import comtypes
+                    comtypes.CoInitialize()
+                except Exception:
+                    pass
+                import hks_reader
+                records = hks_reader.read_schedule(log=self.log)
+                vm = hks_reader.build_vehicle_map(records)
+                m = {}
+                for no, recs in vm.items():
+                    site = recs[0]["site"]
+                    if len(recs) > 1:
+                        site += f"他{len(recs) - 1}件"
+                    m[no] = {"customer": recs[0]["customer"], "site": site}
+                self.hks_map = m
+                self.hks_imported_at = datetime.datetime.now().strftime("%m/%d %H:%M")
+                save_config(self._current_config())
+                self.log(f"Hks番割を取り込みました: {len(m)} 台")
+                for no, info in sorted(m.items(), key=lambda x: x[0].zfill(4)):
+                    self.log(f"  車両{no}: {info['customer']} / {info['site']}")
+            except ImportError:
+                self.log("エラー: pywinauto がインストールされていません。setup.bat を再実行してください")
+            except Exception as e:
+                self.log(f"Hks取込エラー: {e}")
+            finally:
+                self.after(0, lambda: (self.btn_hks.configure(state="normal"),
+                                       self._update_hks_status()))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _save_now(self):
         save_config(self._current_config())
         messagebox.showinfo("保存", "設定を保存しました")
@@ -501,6 +559,8 @@ class App(_BaseWindow):
             "mode": self.var_mode.get(),
             "sort": self.var_sort.get(),
             "dup_mode": self.var_dup.get(),
+            "hks_map": self.hks_map,
+            "hks_imported_at": self.hks_imported_at,
             "single": {
                 "dept": self.var_single_dept.get().strip(),
                 "number": self.var_single_num.get().strip(),
@@ -604,6 +664,7 @@ class App(_BaseWindow):
                     vehicles=targets,
                     headless=not self.var_show.get(),
                     dup_mode=self.var_dup.get(),
+                    vehicle_info=self.hks_map,
                     log=self.log,
                 )
             except Exception as e:

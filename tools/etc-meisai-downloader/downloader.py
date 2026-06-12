@@ -205,6 +205,18 @@ async (action) => {
 """
 
 
+def _total_fare(page):
+    """結果画面の「通行料金合計」を円(int)で返す。見つからなければ None"""
+    body = page.inner_text("body")
+    m = re.search(r"通行料金合計[\s\S]{0,80}?([0-9][0-9,]*)", body)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _download_pdf(page, dest: Path, log):
     """結果画面で全頁選択し、利用明細PDFをPOSTで取得して保存する"""
     if page.locator('input[name="hakkoMeisai"]').count() == 0:
@@ -277,12 +289,15 @@ def _append_history(rows):
 
 
 def run(login_id, password, date_from, date_to, save_dir,
-        vehicles=None, headless=False, dup_mode="rename", log=print):
+        vehicles=None, headless=False, dup_mode="rename",
+        vehicle_info=None, log=print):
     """メイン処理。GUI からスレッドで呼ばれる。
 
     vehicles: [{"name": "所属", "number": "27"}, ...]
               空なら車両番号指定なしで1回だけ検索する。
     dup_mode: 同名ファイルがあるときの動作 "overwrite" / "rename" / "skip"
+    vehicle_info: Hks番割から取り込んだ {車両番号: {"customer":…, "site":…}}。
+                  あればPDFファイル名と按分レポートに反映する。
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -303,25 +318,33 @@ def run(login_id, password, date_from, date_to, save_dir,
         page.set_default_timeout(30000)
 
         def process(v):
-            """1台分の処理。(status, detail) を返す。status: saved/no_data/skipped"""
+            """1台分の処理。dict(status/detail/fare) を返す"""
             number = str(v.get("number") or "").strip()
             _goto_search_form(page)
             _set_search_conditions(page, number, date_from, date_to)
             _submit_search(page)
+            fare = _total_fare(page)
 
-            # ファイル名: 日付_車両ナンバー.pdf (例: 20260610_1499.pdf)
-            stem = f"{period}_{number}" if number else f"{period}_全車両"
-            dest = save_dir / f"{_sanitize_filename(stem)}.pdf"
+            # ファイル名: 日付_車両ナンバー[_顧客_現場].pdf
+            parts = [period, number or "全車両"]
+            info = (vehicle_info or {}).get(number)
+            if info:
+                for key in ("customer", "site"):
+                    p = _sanitize_filename(str(info.get(key) or ""))[:20]
+                    if p:
+                        parts.append(p)
+            dest = save_dir / ("_".join(parts) + ".pdf")
             if dest.exists():
                 if dup_mode == "skip":
-                    return "skipped", f"同名ファイルあり: {dest.name}"
+                    return {"status": "skipped",
+                            "detail": f"同名ファイルあり: {dest.name}", "fare": fare}
                 if dup_mode == "rename":
                     dest = _unique_path(dest)
             if _download_pdf(page, dest, log):
-                return "saved", dest.name
-            return "no_data", ""
+                return {"status": "saved", "detail": dest.name, "fare": fare}
+            return {"status": "no_data", "detail": "", "fare": fare}
 
-        results = {}  # index -> (status, detail)
+        results = {}  # index -> {"status","detail","fare"}
         try:
             _login(page, login_id, password, log)
 
@@ -334,32 +357,32 @@ def run(login_id, password, date_from, date_to, save_dir,
             for i, v in enumerate(targets):
                 log(f"[{i + 1}/{len(targets)}] {label_of(v)}: 検索中 ({date_from} 〜 {date_to})")
                 try:
-                    status, detail = process(v)
-                    results[i] = (status, detail)
+                    r = process(v)
+                    results[i] = r
                     msgs = {
-                        "saved": f"  → 保存: {detail}",
+                        "saved": f"  → 保存: {r['detail']}",
                         "no_data": "  → 期間内の利用データなし",
-                        "skipped": f"  → {detail} のためスキップ",
+                        "skipped": f"  → {r['detail']} のためスキップ",
                     }
-                    log(msgs[status])
+                    log(msgs[r["status"]])
                 except Exception as e:
-                    results[i] = ("failed", str(e))
+                    results[i] = {"status": "failed", "detail": str(e), "fare": None}
                     log(f"  → 失敗: {e}")
                     _dump(page, log, prefix="error")
 
             # 2巡目: 失敗した車両だけ1回リトライ
-            retry_idx = [i for i, (s, _) in results.items() if s == "failed"]
+            retry_idx = [i for i, r in results.items() if r["status"] == "failed"]
             if retry_idx:
                 log(f"--- 失敗した {len(retry_idx)} 台をリトライします ---")
                 for i in retry_idx:
                     v = targets[i]
                     log(f"[リトライ] {label_of(v)}")
                     try:
-                        status, detail = process(v)
-                        results[i] = (status, detail)
-                        log(f"  → リトライ成功: {detail or '利用データなし'}")
+                        r = process(v)
+                        results[i] = r
+                        log(f"  → リトライ成功: {r['detail'] or '利用データなし'}")
                     except Exception as e:
-                        results[i] = ("failed", str(e))
+                        results[i] = {"status": "failed", "detail": str(e), "fare": None}
                         log(f"  → リトライも失敗: {e}")
 
             try:
@@ -380,25 +403,48 @@ def run(login_id, password, date_from, date_to, save_dir,
     history_rows = []
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status_ja = {"saved": "保存", "no_data": "利用なし", "skipped": "スキップ", "failed": "失敗"}
+    report_rows = []
     for i, v in enumerate(targets):
-        status, detail = results.get(i, ("failed", "未処理"))
-        counts[status] += 1
+        r = results.get(i, {"status": "failed", "detail": "未処理", "fare": None})
+        counts[r["status"]] += 1
+        number = str(v.get("number") or "").strip()
         history_rows.append([
             now, str(date_from), str(date_to),
-            (v.get("name") or "").strip(), str(v.get("number") or "").strip(),
-            status_ja[status], detail,
+            (v.get("name") or "").strip(), number,
+            status_ja[r["status"]], r["detail"],
+        ])
+        info = (vehicle_info or {}).get(number, {})
+        report_rows.append([
+            number,
+            info.get("customer", ""), info.get("site", ""),
+            str(date_from), str(date_to),
+            "" if r["fare"] is None else r["fare"],
+            status_ja[r["status"]], r["detail"],
         ])
     try:
         _append_history(history_rows)
     except Exception as e:
         log(f"履歴の記録に失敗しました: {e}")
 
+    # --- 按分レポート (車両×顧客×現場×通行料金合計) ---
+    try:
+        import csv
+        report_path = save_dir / f"按分レポート_{period}.csv"
+        with report_path.open("w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["車両番号", "顧客", "現場", "開始日", "終了日",
+                        "通行料金合計(円)", "結果", "詳細"])
+            w.writerows(report_rows)
+        log(f"按分レポートを保存しました: {report_path.name}")
+    except Exception as e:
+        log(f"按分レポートの作成に失敗しました: {e}")
+
     log(f"=== 完了: 保存 {counts['saved']}台 / 利用なし {counts['no_data']}台"
         f" / スキップ {counts['skipped']}台 / 失敗 {counts['failed']}台 ===")
     if counts["failed"]:
         failed_labels = [
             f"{(targets[i].get('name') or '').strip()}({targets[i].get('number')})"
-            for i, (s, _) in results.items() if s == "failed"
+            for i, r in results.items() if r["status"] == "failed"
         ]
         log(f"失敗した車両: {', '.join(failed_labels)}")
         log("時間をおいて再実行するか、logs フォルダのエラー記録を確認してください")
