@@ -15,6 +15,7 @@ UI Automation 経由で番割予定表ウィンドウを読み、
   例) '軽27-④'→27, '1606ハイ'→1606, '1499'→1499, '7772・Caravan'→7772
 """
 
+import datetime
 import re
 import sys
 from pathlib import Path
@@ -62,10 +63,11 @@ def find_schedule_windows():
 
 
 _HEADER_DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+_HEADER_UPDATE_RE = re.compile(r"\[?\s*(\d{1,2}):(\d{2})\s*更新\s*\]?")
 
 
 def _header_info(win):
-    """ウィンドウ直下のヘッダテキストから (営業所ラベル, 日付ISO) を取る"""
+    """ウィンドウ直下のヘッダから (営業所, 日付ISO, 更新時刻HH:MM) を取る"""
     try:
         for c in win.children():
             try:
@@ -75,13 +77,35 @@ def _header_info(win):
             except Exception:
                 continue
             m = _HEADER_DATE_RE.search(t)
-            if m:
-                date_iso = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-                office = t[:m.start()].strip()
-                return office, date_iso
+            if not m:
+                continue
+            date_iso = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+            office = t[:m.start()].strip()
+            um = _HEADER_UPDATE_RE.search(t)
+            update = f"{int(um.group(1)):02d}:{um.group(2)}" if um else ""
+            return office, date_iso, update
     except Exception:
         pass
-    return "", ""
+    return "", "", ""
+
+
+def _parse_update_dt(hhmm: str, now: datetime.datetime):
+    """HH:MM をその時刻が指す直近の絶対時刻として返す。
+
+    現在時刻より未来になる場合は前日同時刻と解釈する。
+    パース不能なら None。
+    """
+    if not hhmm:
+        return None
+    try:
+        hh, mm = hhmm.split(":")
+        hh, mm = int(hh), int(mm)
+    except Exception:
+        return None
+    dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if dt > now:
+        dt -= datetime.timedelta(days=1)
+    return dt
 
 
 def _snap(ctrl):
@@ -227,8 +251,11 @@ def read_schedule(log=print):
         )
 
     records = []
+    now = datetime.datetime.now()
     for win in wins:
-        office, date_iso = _header_info(win)
+        office, date_iso, update_hhmm = _header_info(win)
+        update_dt = _parse_update_dt(update_hhmm, now)
+        update_dt_iso = update_dt.isoformat() if update_dt else ""
         label = office or "営業所不明"
         # Pane (カードの器) を取得
         pane = None
@@ -243,7 +270,8 @@ def read_schedule(log=print):
             log(f"  {label}: カード領域(Pane)が見つからずスキップしました")
             continue
 
-        log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'})")
+        log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'}"
+            f"{' 更新' + update_hhmm if update_hhmm else ''})")
         root = _snap(pane)
 
         count = 0
@@ -261,6 +289,8 @@ def read_schedule(log=print):
                 if rec["vehicle_no"]:
                     rec["office"] = office
                     rec["date"] = date_iso
+                    rec["update_hhmm"] = update_hhmm
+                    rec["update_dt"] = update_dt_iso
                     records.append(rec)
                     count += 1
         log(f"  → {count} 件の車両割当を取得")

@@ -124,10 +124,9 @@ class App(_BaseWindow):
         self.var_reg_dept = tk.StringVar()
         self.var_reg_num = tk.StringVar()
 
-        # Hks番割から取り込んだ {車両番号: {"customer","site","multi"}} (config から復元)
-        self.hks_map = cfg.get("hks_map", {}) or {}
+        # Hks番割から取り込んだ全レコード (各レコードに office/date/update_dt 等を含む)
+        self.hks_records = cfg.get("hks_records", []) or []
         self.hks_imported_at = cfg.get("hks_imported_at", "")
-        self.hks_date = cfg.get("hks_date", "")   # 番割の対象日 (ISO)
         self.var_hks_status = tk.StringVar()
         self._update_hks_status()
 
@@ -502,14 +501,46 @@ class App(_BaseWindow):
         messagebox.showinfo("読み込み結果", msg)
 
     # ============================================================ Hks取込
+    def _hks_dates(self):
+        return sorted({r.get("date") for r in self.hks_records if r.get("date")})
+
+    def _hks_offices_summary(self):
+        # 営業所別の件数を「営業所名:N」の形で並べる
+        from collections import Counter
+        cnt = Counter((r.get("date", ""), r.get("office", "")) for r in self.hks_records)
+        parts = []
+        for (d, o), n in sorted(cnt.items()):
+            parts.append(f"{d} {o or '営業所不明'}({n})")
+        return " / ".join(parts)
+
     def _update_hks_status(self):
-        if self.hks_map:
-            date_label = f"{self.hks_date}分 / " if self.hks_date else ""
+        if self.hks_records:
+            dates = self._hks_dates()
             self.var_hks_status.set(
-                f"取込済: {len(self.hks_map)}台 ({date_label}取込{self.hks_imported_at})"
+                f"取込済: {len(self.hks_records)}件 "
+                f"({', '.join(dates) or '日付不明'} / 取込{self.hks_imported_at})"
             )
         else:
             self.var_hks_status.set("未取込 (Hksの番割予定表を開いた状態で押してください)")
+
+    def _build_vehicle_info(self, target_date_iso):
+        """target_date_iso と一致するレコードから車両→顧客・現場の辞書を作る"""
+        from collections import OrderedDict
+        by_no = OrderedDict()
+        for r in self.hks_records:
+            if r.get("date") != target_date_iso:
+                continue
+            by_no.setdefault(r["vehicle_no"], []).append(r)
+        result = {}
+        for no, recs in by_no.items():
+            customers = list(dict.fromkeys(r["customer"] for r in recs))
+            sites = list(dict.fromkeys(r["site"] for r in recs))
+            result[no] = {
+                "customer": " / ".join(customers),
+                "site": " / ".join(sites),
+                "multi": len(recs) > 1,
+            }
+        return result
 
     def on_import_hks(self):
         self.btn_hks.configure(state="disabled")
@@ -523,47 +554,34 @@ class App(_BaseWindow):
                     pass
                 import hks_reader
                 records = hks_reader.read_schedule(log=self.log)
-
-                # 番割の対象日 (複数画面で日付が割れていたら警告)
-                dates = sorted({r.get("date") for r in records if r.get("date")})
-                if len(dates) > 1:
-                    self.log(f"⚠ 複数の予定表で日付が異なります: {', '.join(dates)}")
-                    self.after(0, lambda: messagebox.showwarning(
-                        "日付の不一致",
-                        "開いている番割予定表の日付が揃っていません:\n"
-                        + "\n".join(dates)
-                        + "\n同じ日の予定表だけを開いて取込み直してください。"))
-                self.hks_date = dates[0] if len(dates) == 1 else ""
-
-                vm = hks_reader.build_vehicle_map(records)
-                m = {}
-                multi_list = []
-                for no, recs in vm.items():
-                    customers = list(dict.fromkeys(r["customer"] for r in recs))
-                    sites = list(dict.fromkeys(r["site"] for r in recs))
-                    multi = len(recs) > 1
-                    m[no] = {
-                        "customer": " / ".join(customers),
-                        "site": " / ".join(sites),
-                        "multi": multi,
-                    }
-                    if multi:
-                        multi_list.append(f"車両{no}: " + " / ".join(sites))
-                self.hks_map = m
+                records = self._dedup_hks_windows(records)
+                self.hks_records = records
                 self.hks_imported_at = datetime.datetime.now().strftime("%m/%d %H:%M")
                 save_config(self._current_config())
 
-                self.log(f"Hks番割を取り込みました: {len(m)} 台"
-                         + (f" (対象日: {self.hks_date})" if self.hks_date else ""))
-                for no, info in sorted(m.items(), key=lambda x: x[0].zfill(4)):
-                    mark = " ⚠複数現場" if info.get("multi") else ""
-                    self.log(f"  車両{no}: {info['customer']} / {info['site']}{mark}")
+                dates = sorted({r.get("date") for r in records if r.get("date")})
+                self.log(f"Hks番割を取り込みました: {len(records)} 件 / "
+                         f"対象日: {', '.join(dates) or '不明'}")
+
+                # 車両ごとに集約 (複数現場の検出と全体表示用)
+                from collections import OrderedDict
+                by_no = OrderedDict()
+                for r in records:
+                    by_no.setdefault((r.get("date"), r["vehicle_no"]), []).append(r)
+                multi_list = []
+                for (d, no), recs in sorted(by_no.items(), key=lambda x: (x[0][0] or "", x[0][1].zfill(4))):
+                    customers = list(dict.fromkeys(r["customer"] for r in recs))
+                    sites = list(dict.fromkeys(r["site"] for r in recs))
+                    mark = " ⚠複数現場" if len(recs) > 1 else ""
+                    self.log(f"  {d} 車両{no}: {' / '.join(customers)} / {' / '.join(sites)}{mark}")
+                    if len(recs) > 1:
+                        multi_list.append(f"{d} 車両{no}: " + " / ".join(sites))
                 if multi_list:
-                    self.log(f"⚠ 複数現場に割り当てられた車両が {len(multi_list)} 台あります")
+                    self.log(f"⚠ 複数現場に割り当てられた車両が {len(multi_list)} 件あります")
                     self.after(0, lambda: messagebox.showwarning(
                         "複数現場の車両",
                         "同じ車両が複数の現場に割り当てられています。\n"
-                        "PDF名は「複数現場」、レポートには全現場を記録します。\n\n"
+                        "PDF名は「複数現場」、按分レポートには全現場を記録します。\n\n"
                         + "\n".join(multi_list)))
             except ImportError:
                 self.log("エラー: pywinauto がインストールされていません。setup.bat を再実行してください")
@@ -574,6 +592,59 @@ class App(_BaseWindow):
                                        self._update_hks_status()))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _dedup_hks_windows(self, records):
+        """同じ(営業所,日付)の予定表が複数あれば、更新時刻が最も新しいものだけ残す。
+        24時間以上前の予定表は除外する。除外内容はログに残す。
+        """
+        if not records:
+            return records
+        # ウィンドウキー: (office, date) -> (latest_update_dt_iso, update_hhmm)
+        windows = {}
+        for r in records:
+            key = (r.get("office", ""), r.get("date", ""))
+            u = r.get("update_dt", "")
+            prev = windows.get(key)
+            if prev is None or (u and u > prev[0]):
+                windows[key] = (u, r.get("update_hhmm", ""))
+        # 24時間判定
+        now = datetime.datetime.now()
+        cutoff = now - datetime.timedelta(hours=24)
+        kept_windows = {}
+        for key, (u_iso, hhmm) in windows.items():
+            office, date = key
+            if not u_iso:
+                # 更新時刻不明 → 採用 (他に同条件がなければ)
+                kept_windows[key] = (u_iso, hhmm)
+                continue
+            try:
+                u_dt = datetime.datetime.fromisoformat(u_iso)
+            except Exception:
+                kept_windows[key] = (u_iso, hhmm)
+                continue
+            if u_dt < cutoff:
+                self.log(f"  予定表 [{date} {office or '営業所不明'} 更新{hhmm}] "
+                         f"は24時間以上経過しているため除外しました")
+            else:
+                kept_windows[key] = (u_iso, hhmm)
+
+        kept = []
+        dropped = []
+        for r in records:
+            key = (r.get("office", ""), r.get("date", ""))
+            keep = windows.get(key)
+            if key in kept_windows and r.get("update_dt", "") == kept_windows[key][0]:
+                kept.append(r)
+            else:
+                dropped.append(r)
+        # 重複ウィンドウ (同 office,date で更新時刻違い) の件数を集計してログ
+        from collections import Counter
+        cnt = Counter((r.get("office", ""), r.get("date", ""), r.get("update_hhmm", ""))
+                      for r in dropped if (r.get("office", ""), r.get("date", "")) in kept_windows)
+        for (office, date, hhmm), n in sorted(cnt.items()):
+            self.log(f"  予定表 [{date} {office or '営業所不明'} 更新{hhmm}] "
+                     f"はより新しい同条件の予定表があるため除外しました ({n}件)")
+        return kept
 
     def _save_now(self):
         save_config(self._current_config())
@@ -589,9 +660,8 @@ class App(_BaseWindow):
             "mode": self.var_mode.get(),
             "sort": self.var_sort.get(),
             "dup_mode": self.var_dup.get(),
-            "hks_map": self.hks_map,
+            "hks_records": self.hks_records,
             "hks_imported_at": self.hks_imported_at,
-            "hks_date": self.hks_date,
             "single": {
                 "dept": self.var_single_dept.get().strip(),
                 "number": self.var_single_num.get().strip(),
@@ -682,20 +752,33 @@ class App(_BaseWindow):
 
         # --- Hks取込情報とPDF名の整合チェック ---
         single_day = (d_from == d_to)
-        name_in_filename = bool(self.hks_map) and single_day
-        if self.hks_map and not single_day:
-            self.log("※複数日検索のため、PDF名に顧客・現場は付けません (番割は1日分のため)")
-        if name_in_filename and self.hks_date and str(d_from) != self.hks_date:
-            if not messagebox.askyesno(
-                "日付の不一致",
-                f"取込済みの番割予定表は {self.hks_date} 分ですが、\n"
-                f"検索対象日は {d_from} です。\n\n"
-                "このまま実行すると、PDF名・按分レポートの顧客・現場が\n"
-                "別の日の割当情報になります。続行しますか？\n\n"
-                "(いいえ → 正しい日の番割予定表をHksで表示して取込み直してください)",
-            ):
-                return
-            self.log(f"⚠ 番割({self.hks_date})と検索日({d_from})が不一致のまま続行します")
+        target_date_iso = str(d_from)
+        hks_dates = self._hks_dates()
+        if not single_day:
+            vehicle_info = None
+            if self.hks_records:
+                self.log("※複数日検索のため、PDF名・按分レポートに顧客・現場は付けません")
+        else:
+            vehicle_info = self._build_vehicle_info(target_date_iso) if self.hks_records else None
+            # 一致しない日付の予定表は無視 (ログに残す)
+            unused_dates = [d for d in hks_dates if d != target_date_iso]
+            for d in unused_dates:
+                n = sum(1 for r in self.hks_records if r.get("date") == d)
+                self.log(f"※番割 {d} 分の {n} 件は検索対象日({target_date_iso})と不一致のため使用しません")
+            # 検索対象日の番割が全く無い場合は確認
+            if self.hks_records and target_date_iso not in hks_dates:
+                if not messagebox.askyesno(
+                    "日付の不一致",
+                    f"取込済みの番割予定表: {', '.join(hks_dates)}\n"
+                    f"検索対象日: {target_date_iso}\n\n"
+                    "検索日に該当する番割がありません。\n"
+                    "PDF名・按分レポートに顧客・現場は付きません。\n\n"
+                    "このまま実行しますか？\n"
+                    "(いいえ → 正しい日の番割をHksで表示して取込み直してください)",
+                ):
+                    return
+                self.log(f"⚠ 番割と検索日が不一致のまま続行します")
+        name_in_filename = bool(vehicle_info) and single_day
 
         self.running = True
         self.btn_run.configure(state="disabled", text="実行中...")
@@ -712,7 +795,7 @@ class App(_BaseWindow):
                     vehicles=targets,
                     headless=not self.var_show.get(),
                     dup_mode=self.var_dup.get(),
-                    vehicle_info=self.hks_map,
+                    vehicle_info=vehicle_info,
                     name_in_filename=name_in_filename,
                     log=self.log,
                 )
