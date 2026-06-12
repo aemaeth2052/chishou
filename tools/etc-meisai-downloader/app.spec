@@ -14,9 +14,15 @@ hiddenimports = (
     + collect_submodules("playwright")
     + collect_submodules("pywinauto")
     + collect_submodules("comtypes")
+    + collect_submodules("pypdf")
+    + collect_submodules("reportlab")
 )
 
-datas = collect_data_files("ttkbootstrap") + collect_data_files("playwright")
+datas = (
+    collect_data_files("ttkbootstrap")
+    + collect_data_files("playwright")
+    + collect_data_files("reportlab")
+)
 
 a = Analysis(
     ["app.py"],

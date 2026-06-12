@@ -113,7 +113,12 @@ class App(_BaseWindow):
         self.var_mode = tk.StringVar(value=cfg.get("mode", "list"))
         self.var_from = tk.StringVar(value=first.strftime("%Y/%m/%d"))
         self.var_to = tk.StringVar(value=today.strftime("%Y/%m/%d"))
-        self.var_sort = tk.StringVar(value=cfg.get("sort", "dept"))
+        self._sort_col = cfg.get("sort_col", "dept")
+        self._sort_desc = bool(cfg.get("sort_desc", False))
+        # PDF書き込み設定 (項目ごとにON/OFF)
+        self.var_stamp_customer = tk.BooleanVar(value=cfg.get("stamp_customer", True))
+        self.var_stamp_site = tk.BooleanVar(value=cfg.get("stamp_site", True))
+        self.var_stamp_driver = tk.BooleanVar(value=cfg.get("stamp_driver", True))
 
         self.var_dup = tk.StringVar(value=cfg.get("dup_mode", "rename"))
 
@@ -191,35 +196,37 @@ class App(_BaseWindow):
         self.mode_area.pack(fill="both", expand=True, pady=4)
 
         # --- リストモード: 登録済み車両 ---
-        self.box_list = ttk.LabelFrame(self.mode_area, text="登録済み車両 (クリックで対象ON/OFF)", padding=6)
-        # ソート
-        sort_row = ttk.Frame(self.box_list)
-        sort_row.pack(fill="x")
-        ttk.Label(sort_row, text="並び順:").pack(side="left")
-        for label, val in (("所属順", "dept"), ("車両番号順", "number"), ("登録順", "added")):
-            ttk.Radiobutton(
-                sort_row, text=label, value=val, variable=self.var_sort,
-                command=self._refresh_list,
-            ).pack(side="left", padx=4)
-        _btn(sort_row, "全て解除", lambda: self._set_all(False), style="secondary").pack(side="right", padx=2)
-        _btn(sort_row, "全てチェック", lambda: self._set_all(True), style="secondary").pack(side="right", padx=2)
+        self.box_list = ttk.LabelFrame(
+            self.mode_area, text="登録済み車両 (対象クリックでON/OFF / 行ダブルクリックで編集)",
+            padding=6)
+        toolbar = ttk.Frame(self.box_list)
+        toolbar.pack(fill="x")
+        ttk.Label(toolbar, text="※列タイトルをクリックで並び替え",
+                  foreground="#888").pack(side="left")
+        _btn(toolbar, "全て解除", lambda: self._set_all(False), style="secondary").pack(side="right", padx=2)
+        _btn(toolbar, "全てチェック", lambda: self._set_all(True), style="secondary").pack(side="right", padx=2)
 
-        # Treeview
+        # Treeview (対象/所属/車両番号/顧客/現場/運転手)
         tree_frame = ttk.Frame(self.box_list)
         tree_frame.pack(fill="both", expand=True, pady=(4, 4))
-        cols = ("on", "dept", "number")
+        cols = ("on", "dept", "number", "customer", "site", "driver")
+        headers = {"on": "対象", "dept": "所属", "number": "車両番号",
+                   "customer": "顧客", "site": "現場", "driver": "運転手"}
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8, selectmode="browse")
-        self.tree.heading("on", text="対象")
-        self.tree.heading("dept", text="所属")
-        self.tree.heading("number", text="車両番号")
-        self.tree.column("on", width=50, anchor="center", stretch=False)
-        self.tree.column("dept", width=120, stretch=False)
-        self.tree.column("number", width=100, anchor="center", stretch=False)
+        for c in cols:
+            self.tree.heading(c, text=headers[c], command=lambda col=c: self._sort_by(col))
+        self.tree.column("on", width=42, anchor="center", stretch=False)
+        self.tree.column("dept", width=80, stretch=False)
+        self.tree.column("number", width=68, anchor="center", stretch=False)
+        self.tree.column("customer", width=150, stretch=False)
+        self.tree.column("site", width=180, stretch=True)
+        self.tree.column("driver", width=90, stretch=False)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
         self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Double-1>", self._on_tree_double)
 
         # 削除のみ (新規登録は設定タブ)
         action = ttk.Frame(self.box_list)
@@ -227,7 +234,7 @@ class App(_BaseWindow):
         _btn(action, "選択行を削除", self._delete_selected, style="danger").pack(side="left")
         ttk.Label(
             action,
-            text="※新規登録・編集は「設定」タブから",
+            text="※新規登録は「設定」タブ / 顧客・現場・運転手はダブルクリックで編集",
             foreground="#888",
         ).pack(side="left", padx=8)
 
@@ -316,6 +323,15 @@ class App(_BaseWindow):
         ):
             ttk.Radiobutton(dupbox, text=label, value=val, variable=self.var_dup).pack(anchor="w")
 
+        # --- PDFへの書き込み ---
+        stampbox = ttk.LabelFrame(root, text="PDFへの書き込み (明細PDF下部に追記する項目)", padding=8)
+        stampbox.pack(fill="x", pady=4)
+        ttk.Checkbutton(stampbox, text="顧客名", variable=self.var_stamp_customer).pack(side="left", padx=6)
+        ttk.Checkbutton(stampbox, text="現場名", variable=self.var_stamp_site).pack(side="left", padx=6)
+        ttk.Checkbutton(stampbox, text="運転手", variable=self.var_stamp_driver).pack(side="left", padx=6)
+        ttk.Label(stampbox, text="※情報がない車両・複数日検索では書き込みません",
+                  foreground="#888").pack(side="left", padx=10)
+
         # --- 車両の新規登録 ---
         regbox = ttk.LabelFrame(root, text="車両の新規登録", padding=8)
         regbox.pack(fill="x", pady=4)
@@ -362,21 +378,37 @@ class App(_BaseWindow):
     def _depts(self):
         return sorted({v["dept"] for v in self.vehicles if v.get("dept")})
 
+    @staticmethod
+    def _ellipsis(s, n):
+        s = str(s or "")
+        return s if len(s) <= n else s[: n - 1] + "…"
+
+    def _sort_by(self, col):
+        """列ヘッダクリック: 同じ列なら昇順/降順をトグル"""
+        if self._sort_col == col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col
+            self._sort_desc = False
+        self._refresh_list()
+
     def _refresh_list(self):
-        key = self.var_sort.get()
-        if key == "dept":
-            order = sorted(
-                range(len(self.vehicles)),
-                key=lambda i: (self.vehicles[i].get("dept", ""), self.vehicles[i].get("number", "")),
-            )
-        elif key == "number":
-            def num_key(i):
-                n = self.vehicles[i].get("number", "")
+        col = self._sort_col
+
+        def key_fn(i):
+            v = self.vehicles[i]
+            if col == "on":
+                return (not v.get("enabled", True),)
+            if col == "number":
+                n = v.get("number", "")
                 try:
                     return (0, int(n))
                 except ValueError:
                     return (1, n)
-            order = sorted(range(len(self.vehicles)), key=num_key)
+            return (str(v.get(col, "")),)
+
+        if col:
+            order = sorted(range(len(self.vehicles)), key=key_fn, reverse=self._sort_desc)
         else:
             order = list(range(len(self.vehicles)))
 
@@ -385,13 +417,70 @@ class App(_BaseWindow):
             for idx in order:
                 v = self.vehicles[idx]
                 mark = "☑" if v.get("enabled", True) else "☐"
-                self.tree.insert("", "end", iid=str(idx), values=(mark, v.get("dept", ""), v.get("number", "")))
+                self.tree.insert("", "end", iid=str(idx), values=(
+                    mark, v.get("dept", ""), v.get("number", ""),
+                    self._ellipsis(v.get("customer", ""), 14),
+                    self._ellipsis(v.get("site", ""), 18),
+                    self._ellipsis(v.get("driver", ""), 8),
+                ))
+            # ヘッダにソート方向を表示
+            headers = {"on": "対象", "dept": "所属", "number": "車両番号",
+                       "customer": "顧客", "site": "現場", "driver": "運転手"}
+            for c, label in headers.items():
+                suffix = ""
+                if c == self._sort_col:
+                    suffix = " ▼" if self._sort_desc else " ▲"
+                self.tree.heading(c, text=label + suffix)
 
         depts = self._depts()
         if hasattr(self, "cb_reg_dept"):
             self.cb_reg_dept["values"] = depts
         if hasattr(self, "cb_single_dept"):
             self.cb_single_dept["values"] = depts
+
+    def _on_tree_double(self, event):
+        """行ダブルクリック → 顧客・現場・運転手の編集ダイアログ"""
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        col = self.tree.identify_column(event.x)
+        if col == "#1":   # 対象列はトグル操作 (シングルクリックで処理済み)
+            return
+        idx = int(item)
+        v = self.vehicles[idx]
+
+        dlg = tk.Toplevel(self)
+        dlg.title(f"編集: {v.get('dept', '')} / 車両{v.get('number', '')}")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        vars_ = {}
+        for r, (key, label) in enumerate(
+                [("customer", "顧客"), ("site", "現場"), ("driver", "運転手")]):
+            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=3)
+            sv = tk.StringVar(value=v.get(key, ""))
+            ttk.Entry(frm, textvariable=sv, width=42).grid(row=r, column=1, padx=6, pady=3)
+            vars_[key] = sv
+        ttk.Label(frm, text="※所属・車両番号の変更は削除→再登録で",
+                  foreground="#888").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, pady=(10, 0), sticky="e")
+
+        def ok():
+            for key, sv in vars_.items():
+                v[key] = sv.get().strip()
+            save_config(self._current_config())
+            self._refresh_list()
+            dlg.destroy()
+
+        _btn(btns, "キャンセル", dlg.destroy, style="secondary").pack(side="right", padx=4)
+        _btn(btns, "保存", ok, style="primary").pack(side="right", padx=4)
+        dlg.bind("<Return>", lambda e: ok())
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
 
     def _on_tree_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -523,25 +612,6 @@ class App(_BaseWindow):
         else:
             self.var_hks_status.set("未取込 (Hksの番割予定表を開いた状態で押してください)")
 
-    def _build_vehicle_info(self, target_date_iso):
-        """target_date_iso と一致するレコードから車両→顧客・現場の辞書を作る"""
-        from collections import OrderedDict
-        by_no = OrderedDict()
-        for r in self.hks_records:
-            if r.get("date") != target_date_iso:
-                continue
-            by_no.setdefault(r["vehicle_no"], []).append(r)
-        result = {}
-        for no, recs in by_no.items():
-            customers = list(dict.fromkeys(r["customer"] for r in recs))
-            sites = list(dict.fromkeys(r["site"] for r in recs))
-            result[no] = {
-                "customer": " / ".join(customers),
-                "site": " / ".join(sites),
-                "multi": len(recs) > 1,
-            }
-        return result
-
     def on_import_hks(self):
         self.btn_hks.configure(state="disabled")
 
@@ -563,19 +633,48 @@ class App(_BaseWindow):
                 self.log(f"Hks番割を取り込みました: {len(records)} 件 / "
                          f"対象日: {', '.join(dates) or '不明'}")
 
-                # 車両ごとに集約 (複数現場の検出と全体表示用)
+                # 車両ごとに集約 (同一車両が複数日付に出る場合は新しい日付を優先)
                 from collections import OrderedDict
                 by_no = OrderedDict()
                 for r in records:
-                    by_no.setdefault((r.get("date"), r["vehicle_no"]), []).append(r)
+                    by_no.setdefault(r["vehicle_no"], []).append(r)
+                info_by_no = {}
                 multi_list = []
-                for (d, no), recs in sorted(by_no.items(), key=lambda x: (x[0][0] or "", x[0][1].zfill(4))):
+                for no, recs in by_no.items():
+                    latest = max((r.get("date") or "") for r in recs)
+                    recs = [r for r in recs if (r.get("date") or "") == latest]
                     customers = list(dict.fromkeys(r["customer"] for r in recs))
                     sites = list(dict.fromkeys(r["site"] for r in recs))
-                    mark = " ⚠複数現場" if len(recs) > 1 else ""
-                    self.log(f"  {d} 車両{no}: {' / '.join(customers)} / {' / '.join(sites)}{mark}")
+                    drivers = [r["workers"][0] for r in recs if r.get("workers")]
+                    info_by_no[no] = {
+                        "customer": " / ".join(customers),
+                        "site": " / ".join(sites),
+                        "driver": drivers[0] if drivers else "",
+                        "hks_date": latest,
+                    }
                     if len(recs) > 1:
-                        multi_list.append(f"{d} 車両{no}: " + " / ".join(sites))
+                        multi_list.append(f"{latest} 車両{no}: " + " / ".join(sites))
+
+                # 登録済み車両リストへ反映
+                matched, unmatched = 0, []
+                registered = {v.get("number") for v in self.vehicles}
+                for v in self.vehicles:
+                    info = info_by_no.get(v.get("number"))
+                    if info:
+                        v.update(info)
+                        matched += 1
+                    else:
+                        # 今回の番割に出てこない車両は情報をクリア
+                        v.update({"customer": "", "site": "", "driver": "", "hks_date": ""})
+                for no in info_by_no:
+                    if no not in registered:
+                        unmatched.append(no)
+                save_config(self._current_config())
+                self.after(0, self._refresh_list)
+
+                self.log(f"登録済み車両への反映: {matched} 台に顧客・現場・運転手をセットしました")
+                if unmatched:
+                    self.log(f"※番割にあるが未登録の車両: {', '.join(sorted(unmatched, key=lambda x: x.zfill(4)))}")
                 if multi_list:
                     self.log(f"⚠ 複数現場に割り当てられた車両が {len(multi_list)} 件あります")
                     self.after(0, lambda: messagebox.showwarning(
@@ -658,8 +757,12 @@ class App(_BaseWindow):
             "headless": not self.var_show.get(),
             "vehicles": self.vehicles,
             "mode": self.var_mode.get(),
-            "sort": self.var_sort.get(),
+            "sort_col": self._sort_col,
+            "sort_desc": self._sort_desc,
             "dup_mode": self.var_dup.get(),
+            "stamp_customer": self.var_stamp_customer.get(),
+            "stamp_site": self.var_stamp_site.get(),
+            "stamp_driver": self.var_stamp_driver.get(),
             "hks_records": self.hks_records,
             "hks_imported_at": self.hks_imported_at,
             "single": {
@@ -750,35 +853,50 @@ class App(_BaseWindow):
 
         save_config(self._current_config())
 
-        # --- Hks取込情報とPDF名の整合チェック ---
+        # --- 車両リストの顧客・現場・運転手情報を使う ---
         single_day = (d_from == d_to)
         target_date_iso = str(d_from)
-        hks_dates = self._hks_dates()
-        if not single_day:
+        # リストから車両番号 → 顧客・現場・運転手 を構築 (空情報の車両は除く)
+        vehicle_info = {}
+        info_dates = set()
+        for v in self.vehicles:
+            no = v.get("number")
+            if not no:
+                continue
+            if not (v.get("customer") or v.get("site") or v.get("driver")):
+                continue
+            vehicle_info[no] = {
+                "customer": v.get("customer", ""),
+                "site": v.get("site", ""),
+                "driver": v.get("driver", ""),
+                "multi": " / " in v.get("site", ""),
+            }
+            if v.get("hks_date"):
+                info_dates.add(v["hks_date"])
+        if not vehicle_info:
             vehicle_info = None
-            if self.hks_records:
-                self.log("※複数日検索のため、PDF名・按分レポートに顧客・現場は付けません")
-        else:
-            vehicle_info = self._build_vehicle_info(target_date_iso) if self.hks_records else None
-            # 一致しない日付の予定表は無視 (ログに残す)
-            unused_dates = [d for d in hks_dates if d != target_date_iso]
-            for d in unused_dates:
-                n = sum(1 for r in self.hks_records if r.get("date") == d)
-                self.log(f"※番割 {d} 分の {n} 件は検索対象日({target_date_iso})と不一致のため使用しません")
-            # 検索対象日の番割が全く無い場合は確認
-            if self.hks_records and target_date_iso not in hks_dates:
-                if not messagebox.askyesno(
-                    "日付の不一致",
-                    f"取込済みの番割予定表: {', '.join(hks_dates)}\n"
-                    f"検索対象日: {target_date_iso}\n\n"
-                    "検索日に該当する番割がありません。\n"
-                    "PDF名・按分レポートに顧客・現場は付きません。\n\n"
-                    "このまま実行しますか？\n"
-                    "(いいえ → 正しい日の番割をHksで表示して取込み直してください)",
-                ):
-                    return
-                self.log(f"⚠ 番割と検索日が不一致のまま続行します")
+
+        if not single_day:
+            if vehicle_info:
+                self.log("※複数日検索のため、PDF名・按分レポート・PDF書き込みに顧客・現場は使いません")
+            vehicle_info = None
+        elif vehicle_info and info_dates and target_date_iso not in info_dates:
+            if not messagebox.askyesno(
+                "日付の不一致",
+                f"車両リストの顧客・現場情報は {', '.join(sorted(info_dates))} の番割です。\n"
+                f"検索対象日は {target_date_iso} です。\n\n"
+                "このまま実行すると、別の日の割当情報がPDF名等に使われます。\n"
+                "続行しますか？\n\n"
+                "(いいえ → 正しい日の番割をHksで表示して取込み直してください)",
+            ):
+                return
+            self.log("⚠ 番割と検索日が不一致のまま続行します")
         name_in_filename = bool(vehicle_info) and single_day
+        stamp_opts = {
+            "customer": self.var_stamp_customer.get(),
+            "site": self.var_stamp_site.get(),
+            "driver": self.var_stamp_driver.get(),
+        }
 
         self.running = True
         self.btn_run.configure(state="disabled", text="実行中...")
@@ -797,6 +915,7 @@ class App(_BaseWindow):
                     dup_mode=self.var_dup.get(),
                     vehicle_info=vehicle_info,
                     name_in_filename=name_in_filename,
+                    stamp_opts=stamp_opts,
                     log=self.log,
                 )
             except Exception as e:

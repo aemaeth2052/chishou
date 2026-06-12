@@ -314,7 +314,7 @@ def _append_history(rows):
 
 def run(login_id, password, date_from, date_to, save_dir,
         vehicles=None, headless=False, dup_mode="rename",
-        vehicle_info=None, name_in_filename=True, log=print):
+        vehicle_info=None, name_in_filename=True, stamp_opts=None, log=print):
     """メイン処理。GUI からスレッドで呼ばれる。
 
     vehicles: [{"name": "所属", "number": "27"}, ...]
@@ -372,6 +372,15 @@ def run(login_id, password, date_from, date_to, save_dir,
                 if dup_mode == "rename":
                     dest = _unique_path(dest)
             if _download_pdf(page, dest, log):
+                # 顧客・現場・運転手をPDF下部に書き込み (設定で項目選択)
+                if info and stamp_opts and any(stamp_opts.values()):
+                    try:
+                        import pdf_stamp
+                        label = pdf_stamp.build_label(info, stamp_opts)
+                        if label and pdf_stamp.stamp_pdf(dest, label):
+                            log("  → PDFに顧客・現場情報を書き込みました")
+                    except Exception as e:
+                        log(f"  → PDF書き込みに失敗しました(PDF本体は保存済): {e}")
                 return {"status": "saved", "detail": dest.name, "fare": fare}
             return {"status": "no_data", "detail": "", "fare": fare}
 
@@ -447,7 +456,7 @@ def run(login_id, password, date_from, date_to, save_dir,
         info = (vehicle_info or {}).get(number, {})
         report_rows.append([
             number,
-            info.get("customer", ""), info.get("site", ""),
+            info.get("customer", ""), info.get("site", ""), info.get("driver", ""),
             str(date_from), str(date_to),
             "" if r["fare"] is None else r["fare"],
             status_ja[r["status"]], r["detail"],
@@ -463,7 +472,7 @@ def run(login_id, password, date_from, date_to, save_dir,
         report_path = save_dir / f"按分レポート_{period}.csv"
         with report_path.open("w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["車両番号", "顧客", "現場", "開始日", "終了日",
+            w.writerow(["車両番号", "顧客", "現場", "運転手", "開始日", "終了日",
                         "通行料金合計(円)", "結果", "詳細"])
             w.writerows(report_rows)
         log(f"按分レポートを保存しました: {report_path.name}")
