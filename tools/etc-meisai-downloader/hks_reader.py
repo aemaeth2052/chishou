@@ -26,6 +26,27 @@ FLAG_CHARS = set("￥地書他注")
 # 顧客カードではないセクション見出し
 NON_CUSTOMER = {"待機", "休み/留守", "休み", "留守"}
 
+# 先頭の装飾記号 (●★☆◎ など) と、顧客名先頭の [若松] [下建] [元 商] 等の角カッコ
+_LEAD_MARK_RE = re.compile(r"^[●★☆◎▲△◆◇■□]+\s*")
+_LEAD_BRACKET_RE = re.compile(r"^[\[【［][^\]】］]*[\]】］]\s*")
+
+
+def _strip_lead_marks(text: str) -> str:
+    """先頭の装飾(●など)を除去"""
+    return _LEAD_MARK_RE.sub("", text).strip()
+
+
+def _clean_customer(text: str) -> str:
+    """顧客名: 先頭の角カッコ ([若松] [下建] 等) と装飾記号を除去"""
+    s = text.strip()
+    while True:
+        prev = s
+        s = _LEAD_BRACKET_RE.sub("", s)
+        s = _LEAD_MARK_RE.sub("", s)
+        if s == prev:
+            break
+    return s
+
 
 def find_schedule_window():
     """番割予定表ウィンドウ(pywinautoラッパー)を返す。無ければ None"""
@@ -146,7 +167,7 @@ def _parse_block(block, customer):
             continue
         if t in TRANSPORTS or t in FLAG_CHARS:
             continue
-        site = t
+        site = _strip_lead_marks(t)
         break
 
     # 住所 (best-effort)
@@ -201,7 +222,7 @@ def read_schedule(log=print):
         if child["ct"] == "Text":
             t = child["text"].strip()
             if t and t not in NON_CUSTOMER:
-                current_customer = t
+                current_customer = _clean_customer(t)
             elif t in NON_CUSTOMER:
                 current_customer = None   # 待機/休み セクションに入った
         elif child["ct"] == "Custom" and current_customer:
