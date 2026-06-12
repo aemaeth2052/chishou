@@ -48,16 +48,40 @@ def _clean_customer(text: str) -> str:
     return s
 
 
-def find_schedule_window():
-    """番割予定表ウィンドウ(pywinautoラッパー)を返す。無ければ None"""
+def find_schedule_windows():
+    """番割予定表ウィンドウを全て返す (営業所ごとに複数開いている場合に対応)"""
     from pywinauto import Desktop
+    wins = []
     for w in Desktop(backend="uia").windows():
         try:
             if "予定表" in w.window_text():
-                return w
+                wins.append(w)
         except Exception:
             continue
-    return None
+    return wins
+
+
+_HEADER_DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+
+
+def _header_info(win):
+    """ウィンドウ直下のヘッダテキストから (営業所ラベル, 日付ISO) を取る"""
+    try:
+        for c in win.children():
+            try:
+                if c.element_info.control_type != "Text":
+                    continue
+                t = (c.window_text() or "").strip()
+            except Exception:
+                continue
+            m = _HEADER_DATE_RE.search(t)
+            if m:
+                date_iso = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+                office = t[:m.start()].strip()
+                return office, date_iso
+    except Exception:
+        pass
+    return "", ""
 
 
 def _snap(ctrl):
@@ -190,47 +214,58 @@ def _parse_block(block, customer):
 
 
 def read_schedule(log=print):
-    """番割予定表を読み、現場レコードのリストを返す。
+    """開いている全ての番割予定表を読み、現場レコードのリストを返す。
 
     各レコード: {customer, site, vehicle_raw, vehicle_no, etc_label,
-                departure, transport, workers, address}
+                departure, transport, workers, address, office, date}
     車両が特定できたレコードのみ返す。
     """
-    win = find_schedule_window()
-    if win is None:
+    wins = find_schedule_windows()
+    if not wins:
         raise RuntimeError(
             "番割予定表ウィンドウが見つかりません。Hksで番割予定表を表示してください。"
         )
-    # Pane (カードの器) を取得
-    pane = None
-    for c in win.children():
-        try:
-            if c.element_info.control_type == "Pane":
-                pane = c
-                break
-        except Exception:
-            continue
-    if pane is None:
-        raise RuntimeError("予定表のカード領域(Pane)が見つかりませんでした。")
-
-    log("番割予定表を読み取っています...")
-    root = _snap(pane)
 
     records = []
-    current_customer = None
-    for child in root["children"]:
-        if child["ct"] == "Text":
-            t = child["text"].strip()
-            if t and t not in NON_CUSTOMER:
-                current_customer = _clean_customer(t)
-            elif t in NON_CUSTOMER:
-                current_customer = None   # 待機/休み セクションに入った
-        elif child["ct"] == "Custom" and current_customer:
-            rec = _parse_block(child, current_customer)
-            # 車両が取れたものだけ採用 (待機・休み・電車のみは除外)
-            if rec["vehicle_no"]:
-                records.append(rec)
-    log(f"読み取り完了: {len(records)} 件の車両割当を取得")
+    for win in wins:
+        office, date_iso = _header_info(win)
+        label = office or "営業所不明"
+        # Pane (カードの器) を取得
+        pane = None
+        for c in win.children():
+            try:
+                if c.element_info.control_type == "Pane":
+                    pane = c
+                    break
+            except Exception:
+                continue
+        if pane is None:
+            log(f"  {label}: カード領域(Pane)が見つからずスキップしました")
+            continue
+
+        log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'})")
+        root = _snap(pane)
+
+        count = 0
+        current_customer = None
+        for child in root["children"]:
+            if child["ct"] == "Text":
+                t = child["text"].strip()
+                if t and t not in NON_CUSTOMER:
+                    current_customer = _clean_customer(t)
+                elif t in NON_CUSTOMER:
+                    current_customer = None   # 待機/休み セクションに入った
+            elif child["ct"] == "Custom" and current_customer:
+                rec = _parse_block(child, current_customer)
+                # 車両が取れたものだけ採用 (待機・休み・電車のみは除外)
+                if rec["vehicle_no"]:
+                    rec["office"] = office
+                    rec["date"] = date_iso
+                    records.append(rec)
+                    count += 1
+        log(f"  → {count} 件の車両割当を取得")
+
+    log(f"読み取り完了: 合計 {len(records)} 件 (予定表 {len(wins)} 画面)")
     return records
 
 

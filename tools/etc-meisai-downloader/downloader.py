@@ -314,14 +314,15 @@ def _append_history(rows):
 
 def run(login_id, password, date_from, date_to, save_dir,
         vehicles=None, headless=False, dup_mode="rename",
-        vehicle_info=None, log=print):
+        vehicle_info=None, name_in_filename=True, log=print):
     """メイン処理。GUI からスレッドで呼ばれる。
 
     vehicles: [{"name": "所属", "number": "27"}, ...]
               空なら車両番号指定なしで1回だけ検索する。
     dup_mode: 同名ファイルがあるときの動作 "overwrite" / "rename" / "skip"
-    vehicle_info: Hks番割から取り込んだ {車両番号: {"customer":…, "site":…}}。
-                  あればPDFファイル名と按分レポートに反映する。
+    vehicle_info: Hks番割から取り込んだ {車両番号: {"customer","site","multi"}}。
+                  按分レポートに反映し、name_in_filename が真なら
+                  PDFファイル名にも顧客・現場を付ける (複数現場の車両は「複数現場」)。
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -352,9 +353,15 @@ def run(login_id, password, date_from, date_to, save_dir,
             # ファイル名: 日付_車両ナンバー[_顧客_現場].pdf
             parts = [period, number or "全車両"]
             info = (vehicle_info or {}).get(number)
-            if info:
-                for key in ("customer", "site"):
-                    p = _sanitize_filename(str(info.get(key) or ""))[:20]
+            if info and name_in_filename:
+                cust = str(info.get("customer") or "")
+                site = str(info.get("site") or "")
+                if info.get("multi"):
+                    # 複数現場に割り当てられた車両 (詳細は按分レポート参照)
+                    cust = cust.split(" / ")[0]
+                    site = "複数現場"
+                for p in (cust, site):
+                    p = _sanitize_filename(p)[:20]
                     if p:
                         parts.append(p)
             dest = save_dir / ("_".join(parts) + ".pdf")
