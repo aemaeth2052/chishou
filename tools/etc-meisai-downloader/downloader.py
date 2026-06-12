@@ -373,11 +373,13 @@ def run(login_id, password, date_from, date_to, save_dir,
                     dest = _unique_path(dest)
             if _download_pdf(page, dest, log):
                 # 顧客・現場・運転手をPDF下部に書き込み (設定で項目選択)
-                if info and stamp_opts and any(stamp_opts.values()):
+                if info and stamp_opts and any(
+                        stamp_opts.get(k) for k in ("customer", "site", "driver")):
                     try:
                         import pdf_stamp
                         label = pdf_stamp.build_label(info, stamp_opts)
-                        if label and pdf_stamp.stamp_pdf(dest, label):
+                        if label and pdf_stamp.stamp_pdf(
+                                dest, label, font_size=stamp_opts.get("font_size")):
                             log("  → PDFに顧客・現場情報を書き込みました")
                     except Exception as e:
                         log(f"  → PDF書き込みに失敗しました(PDF本体は保存済): {e}")

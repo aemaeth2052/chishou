@@ -12,7 +12,7 @@ import io
 from pathlib import Path
 
 FONT_NAME = "HeiseiKakuGo-W5"
-FONT_SIZE = 27     # 9pt の3倍
+DEFAULT_FONT_SIZE = 27
 X_MM = 18          # 左端からの位置
 Y_MM = 30          # 下端からの位置 (フッターロゴの上)
 
@@ -29,10 +29,15 @@ def build_label(info: dict, opts: dict) -> str:
     return "　　".join(parts)
 
 
-def stamp_pdf(path, label: str) -> bool:
+def stamp_pdf(path, label: str, font_size: int = None) -> bool:
     """PDFの全ページ下部に label を書き込んで上書き保存する"""
     if not label:
         return False
+    try:
+        font_size = int(font_size or DEFAULT_FONT_SIZE)
+    except (TypeError, ValueError):
+        font_size = DEFAULT_FONT_SIZE
+    font_size = max(6, min(font_size, 72))
     from pypdf import PdfReader, PdfWriter
     from reportlab.lib.units import mm
     from reportlab.pdfbase import pdfmetrics
@@ -54,12 +59,12 @@ def stamp_pdf(path, label: str) -> bool:
         # ページ幅に収まるよう必要なら末尾を「…」で詰める
         text = label
         max_w = w - 2 * X_MM * mm
-        while text and pdfmetrics.stringWidth(text, FONT_NAME, FONT_SIZE) > max_w:
+        while text and pdfmetrics.stringWidth(text, FONT_NAME, font_size) > max_w:
             text = text[:-2] + "…"
 
         buf = io.BytesIO()
         c = canvas.Canvas(buf, pagesize=(w, h))
-        c.setFont(FONT_NAME, FONT_SIZE)
+        c.setFont(FONT_NAME, font_size)
         c.drawString(X_MM * mm, Y_MM * mm, text)
         c.save()
         buf.seek(0)

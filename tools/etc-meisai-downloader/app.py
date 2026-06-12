@@ -119,6 +119,7 @@ class App(_BaseWindow):
         self.var_stamp_customer = tk.BooleanVar(value=cfg.get("stamp_customer", True))
         self.var_stamp_site = tk.BooleanVar(value=cfg.get("stamp_site", True))
         self.var_stamp_driver = tk.BooleanVar(value=cfg.get("stamp_driver", True))
+        self.var_stamp_size = tk.IntVar(value=int(cfg.get("stamp_font_size", 27)))
 
         self.var_dup = tk.StringVar(value=cfg.get("dup_mode", "rename"))
 
@@ -329,6 +330,10 @@ class App(_BaseWindow):
         ttk.Checkbutton(stampbox, text="顧客名", variable=self.var_stamp_customer).pack(side="left", padx=6)
         ttk.Checkbutton(stampbox, text="現場名", variable=self.var_stamp_site).pack(side="left", padx=6)
         ttk.Checkbutton(stampbox, text="運転手", variable=self.var_stamp_driver).pack(side="left", padx=6)
+        ttk.Label(stampbox, text="文字サイズ").pack(side="left", padx=(14, 2))
+        ttk.Spinbox(stampbox, from_=6, to=72, increment=1, width=5,
+                    textvariable=self.var_stamp_size).pack(side="left")
+        ttk.Label(stampbox, text="pt").pack(side="left", padx=(2, 0))
         ttk.Label(stampbox, text="※情報がない車両・複数日検索では書き込みません",
                   foreground="#888").pack(side="left", padx=10)
 
@@ -745,6 +750,14 @@ class App(_BaseWindow):
                      f"はより新しい同条件の予定表があるため除外しました ({n}件)")
         return kept
 
+    def _stamp_size(self):
+        """文字サイズ設定を安全に読む (空欄・異常値は既定27、6〜72に丸め)"""
+        try:
+            v = int(self.var_stamp_size.get())
+        except Exception:
+            v = 27
+        return max(6, min(v, 72))
+
     def _save_now(self):
         save_config(self._current_config())
         messagebox.showinfo("保存", "設定を保存しました")
@@ -763,6 +776,7 @@ class App(_BaseWindow):
             "stamp_customer": self.var_stamp_customer.get(),
             "stamp_site": self.var_stamp_site.get(),
             "stamp_driver": self.var_stamp_driver.get(),
+            "stamp_font_size": self._stamp_size(),
             "hks_records": self.hks_records,
             "hks_imported_at": self.hks_imported_at,
             "single": {
@@ -896,6 +910,7 @@ class App(_BaseWindow):
             "customer": self.var_stamp_customer.get(),
             "site": self.var_stamp_site.get(),
             "driver": self.var_stamp_driver.get(),
+            "font_size": self._stamp_size(),
         }
 
         self.running = True
