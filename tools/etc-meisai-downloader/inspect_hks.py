@@ -1,19 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Hks UIA構造調査ツール v2
+"""Hks UIA構造調査ツール v3 (最終)
 
-v1で「グリッド候補0件」となった原因の切り分け。
-コントロールを control_type で絞らず、全要素を走査して
-特徴を吐き出す。テキストが1つでも取れれば UIA経由で読める可能性あり。
+v2でメニューバーしか取れなかったので、
+- 同じプロセスの全ウィンドウを列挙 (MDI子ウィンドウ含む)
+- UIA backend と win32 backend の両方を試す
+- "番割" を含むウィンドウを優先的に深掘り
+を実施する。
 """
 
 import sys
 import time
 import traceback
+from collections import Counter
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parent / "inspect_result.txt"
 MAX_DEPTH = 25
-MAX_NODES = 50000
 
 
 def main():
@@ -25,175 +27,228 @@ def main():
         lines.append(s)
 
     try:
-        from pywinauto import Desktop, Application
+        from pywinauto import Desktop
     except ImportError:
         print("[ERROR] pywinauto がインストールされていません")
-        print("        py -m pip install pywinauto を実行してください")
         sys.exit(1)
 
     log("=" * 70)
-    log(f"調査日時: {time.strftime('%Y-%m-%d %H:%M:%S')}  (v2)")
+    log(f"調査日時: {time.strftime('%Y-%m-%d %H:%M:%S')}  (v3)")
     log("=" * 70)
 
-    desktop = Desktop(backend="uia")
-    candidates = []
-    for w in desktop.windows():
+    # =========================================================
+    # 同じプロセスの全ウィンドウを列挙 (MDI子も含めて)
+    # =========================================================
+    log("\n[1] Hks プロセスを特定")
+    log("-" * 70)
+    target_pid = None
+    desktop_uia = Desktop(backend="uia")
+    for w in desktop_uia.windows():
         try:
             title = w.window_text()
         except Exception:
             continue
-        if "原価システム" in title or "Hks" in title or "HKS" in title:
-            candidates.append((title, w))
-
-    if not candidates:
-        log("[ERROR] Hks原価システムの窓が見つかりませんでした。")
+        if "原価システム" in title:
+            try:
+                target_pid = w.process_id()
+                log(f"見つかりました: pid={target_pid}  title={title[:80]}")
+                break
+            except Exception:
+                pass
+    if not target_pid:
+        log("Hks原価システムが見つかりません。起動して再実行してください。")
         OUT.write_text("\n".join(lines), encoding="utf-8")
         return
 
-    log(f"\n候補ウィンドウ: {len(candidates)} 件")
-    for i, (title, _) in enumerate(candidates):
-        log(f"  [{i}] {title}")
-    target = candidates[0][1]
-    log(f"\n→ [0] を対象に調査します\n")
+    # =========================================================
+    # UIA backend で同プロセスのウィンドウを全部列挙
+    # =========================================================
+    log("\n[2] 同プロセスのウィンドウを列挙 (UIA backend)")
+    log("-" * 70)
+    uia_windows = []
+    for w in desktop_uia.windows():
+        try:
+            if w.process_id() == target_pid:
+                uia_windows.append(w)
+        except Exception:
+            pass
+    log(f"UIA で見えるウィンドウ数: {len(uia_windows)}")
+    for i, w in enumerate(uia_windows):
+        try:
+            t = w.window_text()
+            r = w.rectangle()
+            log(f"  [{i}] size={r.right - r.left}x{r.bottom - r.top}  title={t[:80]}")
+        except Exception:
+            pass
 
-    # ============= 全要素を走査 (control_type で絞らない) =============
-    all_nodes = []  # (depth, ct, cls, name, rect, value, n_children)
-    err_count = [0]
-    node_count = [0]
+    # =========================================================
+    # win32 backend でも列挙 (古いコントロールが見えることがある)
+    # =========================================================
+    log("\n[3] 同プロセスのウィンドウを列挙 (win32 backend)")
+    log("-" * 70)
+    win32_windows = []
+    try:
+        desktop_w32 = Desktop(backend="win32")
+        for w in desktop_w32.windows():
+            try:
+                if w.process_id() == target_pid:
+                    win32_windows.append(w)
+            except Exception:
+                pass
+        log(f"win32 で見えるウィンドウ数: {len(win32_windows)}")
+        for i, w in enumerate(win32_windows):
+            try:
+                t = w.window_text()
+                cls = w.class_name()
+                r = w.rectangle()
+                log(f"  [{i}] cls={cls!r:<30} "
+                    f"size={r.right - r.left}x{r.bottom - r.top}  title={t[:80]}")
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"win32 backend 列挙でエラー: {e}")
 
-    def safe(getter, default=""):
+    # =========================================================
+    # 番割一覧ウィンドウを深掘り (UIA)
+    # =========================================================
+    log("\n[4] 「番割」を含むウィンドウを UIA で深掘り")
+    log("-" * 70)
+    targets = []
+    for w in uia_windows:
+        try:
+            t = w.window_text()
+            if "番割" in t or "一覧" in t:
+                targets.append(w)
+        except Exception:
+            pass
+    if not targets:
+        # 番割が見つからない場合は親ウィンドウ自体を対象に
+        targets = uia_windows[:1]
+    for ti, target in enumerate(targets):
+        try:
+            log(f"\n対象 [{ti}] {target.window_text()[:80]}")
+        except Exception:
+            continue
+        deep_walk(target, log)
+
+    # =========================================================
+    # 番割一覧ウィンドウを深掘り (win32)
+    # =========================================================
+    log("\n[5] 「番割」を含むウィンドウを win32 で深掘り")
+    log("-" * 70)
+    w32_targets = []
+    for w in win32_windows:
+        try:
+            t = w.window_text()
+            if "番割" in t or "一覧" in t:
+                w32_targets.append(w)
+        except Exception:
+            pass
+    if not w32_targets and win32_windows:
+        w32_targets = win32_windows[:3]
+    for ti, target in enumerate(w32_targets):
+        try:
+            log(f"\nwin32対象 [{ti}] cls={target.class_name()} "
+                f"title={target.window_text()[:80]}")
+        except Exception:
+            continue
+        deep_walk_w32(target, log)
+
+    log("\n" + "=" * 70)
+    log("調査完了。inspect_result.txt を共有してください。")
+    log("=" * 70)
+    OUT.write_text("\n".join(lines), encoding="utf-8")
+    print(f"\n結果ファイル: {OUT}")
+
+
+def deep_walk(target, log):
+    """UIA backend の深堀り"""
+    nodes = []
+    err = [0]
+
+    def safe(getter, d=""):
         try:
             v = getter()
-            return v if v is not None else default
+            return v if v is not None else d
         except Exception:
-            err_count[0] += 1
-            return default
+            err[0] += 1
+            return d
 
     def walk(ctrl, depth=0):
-        node_count[0] += 1
-        if node_count[0] > MAX_NODES:
+        if depth > MAX_DEPTH:
             return
         ct = safe(lambda: ctrl.element_info.control_type)
-        cls = safe(lambda: ctrl.element_info.class_name)
         name = safe(lambda: ctrl.element_info.name)
-        value = safe(lambda: ctrl.get_value()) if hasattr(ctrl, "get_value") else ""
         wtext = safe(lambda: ctrl.window_text())
-        try:
-            rect = ctrl.rectangle()
-            rect_str = f"({rect.left},{rect.top},{rect.right},{rect.bottom})"
-            w = rect.right - rect.left
-            h = rect.bottom - rect.top
-        except Exception:
-            rect_str = "?"
-            w = h = 0
-            err_count[0] += 1
         try:
             children = ctrl.children()
         except Exception:
             children = []
-            err_count[0] += 1
-        all_nodes.append({
-            "depth": depth, "ct": ct, "cls": cls, "name": name,
-            "value": value, "wtext": wtext,
-            "rect": rect_str, "w": w, "h": h, "nch": len(children),
-        })
-        if depth < MAX_DEPTH:
-            for c in children:
-                walk(c, depth + 1)
-
-    log("コントロール全走査中...")
+            err[0] += 1
+        nodes.append({"depth": depth, "ct": ct, "name": name,
+                      "wtext": wtext, "nch": len(children)})
+        for c in children:
+            walk(c, depth + 1)
     try:
         walk(target)
     except RecursionError:
-        log("再帰深度オーバー（途中で打ち切り）")
-    log(f"  走査ノード数: {len(all_nodes)}")
-    log(f"  途中エラー数: {err_count[0]}")
-    log("")
-
-    if not all_nodes:
-        log("[判定] 1ノードも取得できません。UIA非対応の可能性が高い。")
-        OUT.write_text("\n".join(lines), encoding="utf-8")
-        return
-
-    # ============= control_type のヒストグラム =============
-    log("-" * 70)
-    log("control_type の出現回数 (上位)")
-    log("-" * 70)
-    from collections import Counter
-    ctcnt = Counter(n["ct"] for n in all_nodes)
-    for ct, cnt in ctcnt.most_common(30):
-        log(f"  {ct or '(空)':<20} : {cnt}")
-    log("")
-
-    # ============= 大きな矩形を持つコントロール (グリッド本体候補) =============
-    log("-" * 70)
-    log("大きな領域を持つコントロール (面積 上位10)")
-    log("-" * 70)
-    big = sorted(all_nodes, key=lambda n: -(n["w"] * n["h"]))[:10]
-    for n in big:
-        log(f"  depth={n['depth']:<2} ct={n['ct']!r:<14} cls={n['cls']!r:<25} "
-            f"size={n['w']}x{n['h']} children={n['nch']} name={n['name'][:30]!r}")
-    log("")
-
-    # ============= 子要素数が多いコントロール (グリッド/リスト疑い) =============
-    log("-" * 70)
-    log("子要素数が多いコントロール (上位10)")
-    log("-" * 70)
-    many = sorted(all_nodes, key=lambda n: -n["nch"])[:10]
-    for n in many:
-        log(f"  depth={n['depth']:<2} ct={n['ct']!r:<14} cls={n['cls']!r:<25} "
-            f"children={n['nch']} size={n['w']}x{n['h']}")
-    log("")
-
-    # ============= 何らかのテキストが取れたコントロール =============
-    log("-" * 70)
-    log("テキストが取れたコントロール (上位30、name/wtext/valueのいずれか非空)")
-    log("-" * 70)
-    text_nodes = [n for n in all_nodes
-                  if (n["name"] or n["wtext"] or n["value"]).strip()]
-    log(f"該当: {len(text_nodes)} / {len(all_nodes)}")
+        log("再帰深度オーバー")
+    log(f"  走査ノード数: {len(nodes)} / エラー: {err[0]}")
+    ctcnt = Counter(n["ct"] for n in nodes)
+    log("  control_type の内訳: " + str(dict(ctcnt.most_common(10))))
+    text_nodes = [n for n in nodes if (n["name"] or n["wtext"]).strip()]
+    log(f"  テキストが取れたノード: {len(text_nodes)}")
     for n in text_nodes[:30]:
-        text = n["name"] or n["wtext"] or n["value"]
-        text = str(text)[:60]
-        log(f"  [{n['ct']}] {text!r}")
-    log("")
+        t = (n["name"] or n["wtext"])[:60]
+        log(f"    [{n['ct']}] {t!r}")
+    # 大きなコントロール
+    bignch = sorted(nodes, key=lambda n: -n["nch"])[:5]
+    log("  子要素数の多いコントロール:")
+    for n in bignch:
+        log(f"    depth={n['depth']} ct={n['ct']} children={n['nch']}")
 
-    # ============= 期待する値が見つかるかキーワード検索 =============
-    log("-" * 70)
-    log("一覧画面のキーワード検索 (顧客名・現場名・車両番号らしき文字)")
-    log("-" * 70)
-    keywords = ["建設", "工務", "株式会社", "営業所", "本線", "Caravar",
-                "宮崎", "あい造", "コウホウ", "1499", "1500", "1606", "7772", "6031"]
-    hits = []
-    for n in all_nodes:
-        text = (n["name"] or "") + " " + (n["wtext"] or "") + " " + str(n["value"] or "")
-        for kw in keywords:
-            if kw in text:
-                hits.append((kw, n))
-                break
-    log(f"キーワードを含むコントロール: {len(hits)} 件")
-    for kw, n in hits[:20]:
-        text = (n["name"] or n["wtext"] or n["value"])[:60]
-        log(f"  [{kw}] ct={n['ct']} text={text!r}")
-    log("")
 
-    # ============= 判定 =============
-    log("=" * 70)
-    log("自動判定")
-    log("=" * 70)
-    if hits:
-        log("⭕ 顧客名や車両番号らしき文字がUIA経由で取得できました。")
-        log("   → UI Automation での読み取りは実装可能です。")
-    elif text_nodes:
-        log("△ メニュー名などのテキストは取れますが、")
-        log("   一覧の中身(顧客名・車両番号)は取れていない可能性があります。")
-        log("   独自描画の疑いが濃いですが、もう一段詳しく調査する余地があります。")
-    else:
-        log("❌ テキストが1つも取れません。UI Automation での読み取りは不可。")
-        log("   → 別手段(OCR/DB直接/ベンダー照会)を検討してください。")
+def deep_walk_w32(target, log):
+    """win32 backend の深堀り (Windows メッセージ経由)"""
+    nodes = []
+    err = [0]
 
-    OUT.write_text("\n".join(lines), encoding="utf-8")
-    print(f"\n結果ファイル: {OUT}")
+    def walk(ctrl, depth=0):
+        if depth > MAX_DEPTH:
+            return
+        try:
+            cls = ctrl.class_name()
+        except Exception:
+            cls = "?"
+            err[0] += 1
+        try:
+            text = ctrl.window_text()
+        except Exception:
+            text = ""
+            err[0] += 1
+        try:
+            children = ctrl.children()
+        except Exception:
+            children = []
+            err[0] += 1
+        nodes.append({"depth": depth, "cls": cls, "text": text, "nch": len(children)})
+        for c in children:
+            walk(c, depth + 1)
+    try:
+        walk(target)
+    except RecursionError:
+        log("再帰深度オーバー")
+    log(f"  走査ノード数: {len(nodes)} / エラー: {err[0]}")
+    clscnt = Counter(n["cls"] for n in nodes)
+    log("  class_name の内訳: " + str(dict(clscnt.most_common(15))))
+    text_nodes = [n for n in nodes if n["text"].strip()]
+    log(f"  テキストが取れたノード: {len(text_nodes)}")
+    for n in text_nodes[:30]:
+        log(f"    [{n['cls']}] {n['text'][:60]!r}")
+    log("  特徴的なクラスを持つコントロール (上位):")
+    for n in sorted(nodes, key=lambda x: -x["nch"])[:5]:
+        log(f"    depth={n['depth']} cls={n['cls']} children={n['nch']} "
+            f"text={n['text'][:40]!r}")
 
 
 if __name__ == "__main__":
