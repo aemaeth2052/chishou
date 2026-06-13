@@ -314,7 +314,8 @@ def _append_history(rows):
 
 def run(login_id, password, date_from, date_to, save_dir,
         vehicles=None, headless=False, dup_mode="rename",
-        vehicle_info=None, name_in_filename=True, stamp_opts=None, log=print):
+        vehicle_info=None, name_in_filename=True, stamp_opts=None, log=print,
+        progress=None):
     """メイン処理。GUI からスレッドで呼ばれる。
 
     vehicles: [{"name": "所属", "number": "27"}, ...]
@@ -323,7 +324,14 @@ def run(login_id, password, date_from, date_to, save_dir,
     vehicle_info: Hks番割から取り込んだ {車両番号: {"customer","site","multi"}}。
                   按分レポートに反映し、name_in_filename が真なら
                   PDFファイル名にも顧客・現場を付ける (複数現場の車両は「複数現場」)。
+    progress: 進捗を通知するコールバック progress(done, total)。GUIのボタン表示などに使う。
     """
+    def notify(done, total):
+        if progress:
+            try:
+                progress(done, total)
+            except Exception:
+                pass
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(exist_ok=True)
@@ -397,6 +405,7 @@ def run(login_id, password, date_from, date_to, save_dir,
 
             # 1巡目: 失敗しても次の車両へ進む
             for i, v in enumerate(targets):
+                notify(i + 1, len(targets))
                 log(f"[{i + 1}/{len(targets)}] {label_of(v)}: 検索中 ({date_from} 〜 {date_to})")
                 try:
                     r = process(v)

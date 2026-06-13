@@ -713,7 +713,7 @@ class App(_BaseWindow):
         # 取込中は検索開始を押せないようにする
         self._hks_importing = True
         self.btn_run.configure(state="disabled")
-        self.set_status("Hks番割を読み取っています...", kind="busy")
+        self.set_status("番割予定表を読み取っています...", kind="busy")
 
         def worker():
             try:
@@ -728,7 +728,7 @@ class App(_BaseWindow):
                     chosen = self._ask_window_selection_sync(metas)
                     if chosen is None:
                         self.log("Hks取込をキャンセルしました")
-                        self.set_status("Hks番割の取込をキャンセルしました", kind="info")
+                        self.set_status("番割予定表の取込をキャンセルしました", kind="info")
                         return
                     metas = [metas[i] for i in chosen]
                 self.log(f"{len(metas)} 画面を取り込みます")
@@ -806,7 +806,7 @@ class App(_BaseWindow):
                 self.log(f"登録済み車両への反映: {matched} 台に顧客・現場・運転手をセットしました")
                 if shared_driver_cleared:
                     self.log(f"  うち {shared_driver_cleared} 台は同一現場に複数車両のため運転手を空欄にしました")
-                self.set_status(f"Hks番割の取込が完了しました ({matched} 台に反映)", kind="success")
+                self.set_status(f"番割予定表の取込が完了しました ({matched} 台に反映)", kind="success")
                 if unmatched:
                     self.log(f"※番割にあるが未登録の車両: {', '.join(sorted(unmatched, key=lambda x: x.zfill(4)))}")
                 if multi_list:
@@ -821,7 +821,7 @@ class App(_BaseWindow):
                 self.set_status("ライブラリが不足しています。setup.bat を再実行してください", kind="error")
             except Exception as e:
                 self.log(f"Hks取込エラー: {e}")
-                self.set_status(f"Hks取込に失敗しました: {e}", kind="error")
+                self.set_status(f"番割予定表の取込に失敗しました: {e}", kind="error")
             finally:
                 def restore():
                     self.btn_hks.configure(state="normal", text="番割全体表示から取込")
@@ -1282,9 +1282,13 @@ class App(_BaseWindow):
         }
 
         self.running = True
-        self.btn_run.configure(state="disabled", text="検索中...")
+        self.btn_run.configure(state="disabled", text=f"検索中 0/{len(targets)}")
         self.set_status(f"ETC明細をダウンロード中... ({len(targets)} 台)", kind="busy")
         self.log(f"=== 開始: {d_from} 〜 {d_to} / 対象 {len(targets)} 台 ===")
+
+        def on_progress(done, total):
+            # ワーカースレッドから呼ばれるので UI 更新は after で本スレッドに戻す
+            self.after(0, lambda: self.btn_run.configure(text=f"検索中 {done}/{total}"))
 
         def worker():
             try:
@@ -1301,6 +1305,7 @@ class App(_BaseWindow):
                     name_in_filename=name_in_filename,
                     stamp_opts=stamp_opts,
                     log=self.log,
+                    progress=on_progress,
                 )
                 self._last_error = None
             except Exception as e:
