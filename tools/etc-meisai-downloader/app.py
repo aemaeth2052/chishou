@@ -212,9 +212,12 @@ class App(_BaseWindow):
         self._make_date_input(box2, self.var_from).grid(row=0, column=1, padx=4)
         ttk.Label(box2, text="〜 終了").grid(row=0, column=2, sticky="w")
         self._make_date_input(box2, self.var_to).grid(row=0, column=3, padx=4)
-        ttk.Button(box2, text="今月", command=self.set_this_month, width=5).grid(row=0, column=4, padx=2)
-        ttk.Button(box2, text="先月", command=self.set_last_month, width=5).grid(row=0, column=5, padx=2)
-        ttk.Button(box2, text="昨日", command=self.set_yesterday, width=5).grid(row=0, column=6, padx=2)
+        # ショートカット: 「昨日：mm/dd(曜)」→「今月」の順
+        yesterday = datetime.date.today() - datetime.timedelta(days=1)
+        wd = "月火水木金土日"[yesterday.weekday()]
+        ttk.Button(box2, text=f"昨日：{yesterday:%m/%d}({wd})",
+                   command=self.set_yesterday).grid(row=0, column=4, padx=2)
+        ttk.Button(box2, text="今月", command=self.set_this_month, width=5).grid(row=0, column=5, padx=2)
 
         # --- 検索対象 (横並び、幅を抑える) ---
         mode_row = ttk.Frame(root)
