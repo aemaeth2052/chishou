@@ -68,6 +68,8 @@ def _btn(parent, text, command, style="default", **kw):
     styles = {
         "primary": "primary",
         "success": "success",
+        "warning": "warning",
+        "info": "info",
         "danger": "danger-outline",
         "secondary": "secondary-outline",
         "default": None,
@@ -75,6 +77,15 @@ def _btn(parent, text, command, style="default", **kw):
     if HAS_TTKB and styles.get(style):
         return ttkb.Button(parent, text=text, command=command, bootstyle=styles[style], **kw)
     return ttk.Button(parent, text=text, command=command, **kw)
+
+
+def _set_btn_style(btn, style):
+    """ttkbootstrap環境ならbootstyleを動的に切替 (フォールバック環境では無視)"""
+    if HAS_TTKB:
+        try:
+            btn.configure(bootstyle=style)
+        except Exception:
+            pass
 
 
 class App(_BaseWindow):
@@ -111,17 +122,19 @@ class App(_BaseWindow):
         )
         self.var_show = tk.BooleanVar(value=not cfg.get("headless", False))
         self.var_mode = tk.StringVar(value=cfg.get("mode", "list"))
-        self.var_from = tk.StringVar(value=first.strftime("%Y/%m/%d"))
-        self.var_to = tk.StringVar(value=today.strftime("%Y/%m/%d"))
+        # デフォルトの検索期間は「昨日」
+        yesterday = today - datetime.timedelta(days=1)
+        self.var_from = tk.StringVar(value=yesterday.strftime("%Y/%m/%d"))
+        self.var_to = tk.StringVar(value=yesterday.strftime("%Y/%m/%d"))
         self._sort_col = cfg.get("sort_col", "dept")
         self._sort_desc = bool(cfg.get("sort_desc", False))
         # PDF書き込み設定 (項目ごとにON/OFF)
         self.var_stamp_customer = tk.BooleanVar(value=cfg.get("stamp_customer", True))
         self.var_stamp_site = tk.BooleanVar(value=cfg.get("stamp_site", True))
         self.var_stamp_driver = tk.BooleanVar(value=cfg.get("stamp_driver", True))
-        self.var_stamp_size = tk.IntVar(value=int(cfg.get("stamp_font_size", 27)))
+        self.var_stamp_size = tk.IntVar(value=int(cfg.get("stamp_font_size", 14)))
 
-        self.var_dup = tk.StringVar(value=cfg.get("dup_mode", "rename"))
+        self.var_dup = tk.StringVar(value=cfg.get("dup_mode", "overwrite"))
 
         single = cfg.get("single", {})
         self.var_single_dept = tk.StringVar(value=single.get("dept", ""))
@@ -256,7 +269,7 @@ class App(_BaseWindow):
         # --- Hks番割の取込 (PDF名と按分レポートに顧客・現場を反映) ---
         hks_row = ttk.Frame(root)
         hks_row.pack(fill="x", pady=(0, 4))
-        self.btn_hks = _btn(hks_row, "Hks番割から取込", self.on_import_hks, style="secondary")
+        self.btn_hks = _btn(hks_row, "Hks番割から取込", self.on_import_hks, style="primary")
         self.btn_hks.pack(side="left")
         ttk.Label(hks_row, textvariable=self.var_hks_status, foreground="#888").pack(side="left", padx=8)
 
@@ -618,7 +631,8 @@ class App(_BaseWindow):
             self.var_hks_status.set("未取込 (Hksの番割予定表を開いた状態で押してください)")
 
     def on_import_hks(self):
-        self.btn_hks.configure(state="disabled")
+        self.btn_hks.configure(state="disabled", text="取込中...")
+        _set_btn_style(self.btn_hks, "warning")
 
         def worker():
             try:
@@ -628,7 +642,20 @@ class App(_BaseWindow):
                 except Exception:
                     pass
                 import hks_reader
-                records = hks_reader.read_schedule(log=self.log)
+                metas = hks_reader.enumerate_windows()
+                if not metas:
+                    raise RuntimeError(
+                        "番割予定表ウィンドウが見つかりません。Hksで番割予定表を表示してください。"
+                    )
+                # 2窓以上ならユーザーに選ばせる
+                if len(metas) >= 2:
+                    chosen = self._ask_window_selection_sync(metas)
+                    if chosen is None:
+                        self.log("Hks取込をキャンセルしました")
+                        return
+                    metas = [metas[i] for i in chosen]
+                self.log(f"{len(metas)} 画面を取り込みます")
+                records = hks_reader.read_windows(metas, log=self.log)
                 records = self._dedup_hks_windows(records)
                 self.hks_records = records
                 self.hks_imported_at = datetime.datetime.now().strftime("%m/%d %H:%M")
@@ -650,11 +677,13 @@ class App(_BaseWindow):
                     recs = [r for r in recs if (r.get("date") or "") == latest]
                     customers = list(dict.fromkeys(r["customer"] for r in recs))
                     sites = list(dict.fromkeys(r["site"] for r in recs))
-                    drivers = [r["workers"][0] for r in recs if r.get("workers")]
+                    drivers = list(dict.fromkeys(
+                        r.get("driver", "") for r in recs if r.get("driver")
+                    ))
                     info_by_no[no] = {
                         "customer": " / ".join(customers),
                         "site": " / ".join(sites),
-                        "driver": drivers[0] if drivers else "",
+                        "driver": " / ".join(drivers),
                         "hks_date": latest,
                     }
                     if len(recs) > 1:
@@ -692,10 +721,112 @@ class App(_BaseWindow):
             except Exception as e:
                 self.log(f"Hks取込エラー: {e}")
             finally:
-                self.after(0, lambda: (self.btn_hks.configure(state="normal"),
-                                       self._update_hks_status()))
+                def restore():
+                    self.btn_hks.configure(state="normal", text="Hks番割から取込")
+                    _set_btn_style(self.btn_hks, "primary")
+                    self._update_hks_status()
+                self.after(0, restore)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _ask_window_selection_sync(self, metas):
+        """ワーカースレッドから呼ぶ。メインスレッドで選択ダイアログを表示して結果を待つ。
+        戻り値: 選択されたインデックスのリスト / None(キャンセル)
+        """
+        event = threading.Event()
+        result = {"indices": None}
+
+        def show():
+            result["indices"] = self._show_window_selection_dialog(metas)
+            event.set()
+
+        self.after(0, show)
+        event.wait()
+        return result["indices"]
+
+    def _show_window_selection_dialog(self, metas):
+        dlg = tk.Toplevel(self)
+        dlg.title("取り込む番割予定表を選択")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        frm = ttk.Frame(dlg, padding=14)
+        frm.pack(fill="both", expand=True)
+
+        big_font = ("", 12)
+        bigger_font = ("", 13, "bold")
+        ttk.Label(
+            frm,
+            text=f"番割予定表が {len(metas)} 件見つかりました。\n取り込むものを選んでください。",
+            font=bigger_font,
+        ).pack(anchor="w", pady=(0, 10))
+
+        list_frame = ttk.Frame(frm)
+        list_frame.pack(fill="both", expand=True)
+
+        vars_ = []
+        for i, m in enumerate(metas):
+            v = tk.BooleanVar(value=True)
+            vars_.append(v)
+            label = (f"  {m.get('office') or '営業所不明':<18}"
+                     f"   {m.get('date') or '日付不明':<12}"
+                     f"   更新 {m.get('update_hhmm') or '不明'}")
+            ttk.Checkbutton(list_frame, text=label, variable=v).pack(anchor="w", pady=4)
+            # フォントを少し大きく
+            try:
+                list_frame.winfo_children()[-1].configure()
+            except Exception:
+                pass
+
+        # Checkbutton のフォント変更 (Style経由)
+        try:
+            style = ttk.Style()
+            style.configure("Big.TCheckbutton", font=big_font)
+            for cb in list_frame.winfo_children():
+                cb.configure(style="Big.TCheckbutton")
+        except Exception:
+            pass
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(14, 0))
+
+        result = {"indices": None}
+
+        def all_on():
+            for v in vars_:
+                v.set(True)
+
+        def all_off():
+            for v in vars_:
+                v.set(False)
+
+        def ok():
+            idx = [i for i, v in enumerate(vars_) if v.get()]
+            if not idx:
+                messagebox.showwarning("選択なし", "少なくとも1件選んでください")
+                return
+            result["indices"] = idx
+            dlg.destroy()
+
+        def cancel():
+            dlg.destroy()
+
+        _btn(btns, "全選択", all_on, style="secondary").pack(side="left", padx=2)
+        _btn(btns, "全解除", all_off, style="secondary").pack(side="left", padx=2)
+        _btn(btns, "キャンセル", cancel, style="secondary").pack(side="right", padx=2)
+        _btn(btns, "取り込む", ok, style="primary").pack(side="right", padx=2)
+        dlg.bind("<Return>", lambda e: ok())
+        dlg.bind("<Escape>", lambda e: cancel())
+
+        # 親の中央に配置
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+        y = self.winfo_rooty() + 80
+        dlg.geometry(f"+{max(x, 50)}+{max(y, 50)}")
+
+        self.wait_window(dlg)
+        return result["indices"]
 
     def _dedup_hks_windows(self, records):
         """同じ(営業所,日付)の予定表が複数あれば、更新時刻が最も新しいものだけ残す。

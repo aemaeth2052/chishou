@@ -221,6 +221,11 @@ def _parse_block(block, customer):
     for t, _ in plain:
         if t in TRANSPORTS and not transport:
             transport = t
+    # 交通手段が「送迎」なら運転手は本人ではなく「送迎」
+    if transport == "送迎":
+        driver = "送迎"
+    else:
+        driver = workers[0] if workers else ""
     for t, _ in plain:
         if re.match(r"^[▲△]?出\s*\d", t) and not departure:
             departure = re.sub(r"^[▲△]", "", t)
@@ -249,70 +254,99 @@ def _parse_block(block, customer):
         "departure": departure,
         "transport": transport,
         "workers": workers,
+        "driver": driver,
         "address": address,
     }
 
 
-def read_schedule(log=print):
-    """開いている全ての番割予定表を読み、現場レコードのリストを返す。
+def enumerate_windows():
+    """開いている番割予定表ウィンドウのメタ情報を列挙する。
 
-    各レコード: {customer, site, vehicle_raw, vehicle_no, etc_label,
-                departure, transport, workers, address, office, date}
-    車両が特定できたレコードのみ返す。
+    Returns: [{win, office, date, update_hhmm}]
     """
     wins = find_schedule_windows()
-    if not wins:
+    result = []
+    for w in wins:
+        office, date_iso, update_hhmm = _header_info(w)
+        result.append({
+            "win": w,
+            "office": office,
+            "date": date_iso,
+            "update_hhmm": update_hhmm,
+        })
+    return result
+
+
+def _read_one_window(win, office, date_iso, update_hhmm, update_dt_iso, log):
+    """1ウィンドウぶんのレコードを返す"""
+    label = office or "営業所不明"
+    pane = None
+    for c in win.children():
+        try:
+            if c.element_info.control_type == "Pane":
+                pane = c
+                break
+        except Exception:
+            continue
+    if pane is None:
+        log(f"  {label}: カード領域(Pane)が見つからずスキップしました")
+        return []
+
+    log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'}"
+        f"{' 更新' + update_hhmm if update_hhmm else ''})")
+    root = _snap(pane)
+    records = []
+    current_customer = None
+    for child in root["children"]:
+        if child["ct"] == "Text":
+            t = child["text"].strip()
+            if t and t not in NON_CUSTOMER:
+                current_customer = _clean_customer(t)
+            elif t in NON_CUSTOMER:
+                current_customer = None
+        elif child["ct"] == "Custom" and current_customer:
+            rec = _parse_block(child, current_customer)
+            if rec["vehicle_no"]:
+                rec["office"] = office
+                rec["date"] = date_iso
+                rec["update_hhmm"] = update_hhmm
+                rec["update_dt"] = update_dt_iso
+                records.append(rec)
+    log(f"  → {len(records)} 件の車両割当を取得")
+    return records
+
+
+def read_windows(metas, log=print):
+    """選択された番割ウィンドウだけを読み、現場レコードを返す。
+
+    metas: enumerate_windows() の戻りの一部または全部
+    """
+    if not metas:
+        return []
+    now = datetime.datetime.now()
+    records = []
+    for m in metas:
+        update_dt = _parse_update_dt(m.get("update_hhmm", ""), now)
+        update_dt_iso = update_dt.isoformat() if update_dt else ""
+        try:
+            records.extend(_read_one_window(
+                m["win"], m.get("office", ""), m.get("date", ""),
+                m.get("update_hhmm", ""), update_dt_iso, log,
+            ))
+        except Exception as e:
+            log(f"  読み取りに失敗: {e}")
+    log(f"読み取り完了: 合計 {len(records)} 件 (予定表 {len(metas)} 画面)")
+    return records
+
+
+def read_schedule(log=print):
+    """互換用: 開いている全ての番割予定表を読み、フラットなレコードのリストを返す"""
+    metas = enumerate_windows()
+    if not metas:
         raise RuntimeError(
             "番割予定表ウィンドウが見つかりません。Hksで番割予定表を表示してください。"
         )
-
-    records = []
-    now = datetime.datetime.now()
-    for win in wins:
-        office, date_iso, update_hhmm = _header_info(win)
-        update_dt = _parse_update_dt(update_hhmm, now)
-        update_dt_iso = update_dt.isoformat() if update_dt else ""
-        label = office or "営業所不明"
-        # Pane (カードの器) を取得
-        pane = None
-        for c in win.children():
-            try:
-                if c.element_info.control_type == "Pane":
-                    pane = c
-                    break
-            except Exception:
-                continue
-        if pane is None:
-            log(f"  {label}: カード領域(Pane)が見つからずスキップしました")
-            continue
-
-        log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'}"
-            f"{' 更新' + update_hhmm if update_hhmm else ''})")
-        root = _snap(pane)
-
-        count = 0
-        current_customer = None
-        for child in root["children"]:
-            if child["ct"] == "Text":
-                t = child["text"].strip()
-                if t and t not in NON_CUSTOMER:
-                    current_customer = _clean_customer(t)
-                elif t in NON_CUSTOMER:
-                    current_customer = None   # 待機/休み セクションに入った
-            elif child["ct"] == "Custom" and current_customer:
-                rec = _parse_block(child, current_customer)
-                # 車両が取れたものだけ採用 (待機・休み・電車のみは除外)
-                if rec["vehicle_no"]:
-                    rec["office"] = office
-                    rec["date"] = date_iso
-                    rec["update_hhmm"] = update_hhmm
-                    rec["update_dt"] = update_dt_iso
-                    records.append(rec)
-                    count += 1
-        log(f"  → {count} 件の車両割当を取得")
-
-    log(f"読み取り完了: 合計 {len(records)} 件 (予定表 {len(wins)} 画面)")
-    return records
+    return read_windows(metas, log=log)
 
 
 def build_vehicle_map(records):

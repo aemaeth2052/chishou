@@ -377,9 +377,9 @@ def run(login_id, password, date_from, date_to, save_dir,
                         stamp_opts.get(k) for k in ("customer", "site", "driver")):
                     try:
                         import pdf_stamp
-                        label = pdf_stamp.build_label(info, stamp_opts)
-                        if label and pdf_stamp.stamp_pdf(
-                                dest, label, font_size=stamp_opts.get("font_size")):
+                        if pdf_stamp.stamp_pdf(
+                                dest, info, stamp_opts,
+                                font_size=stamp_opts.get("font_size")):
                             log("  → PDFに顧客・現場情報を書き込みました")
                     except Exception as e:
                         log(f"  → PDF書き込みに失敗しました(PDF本体は保存済): {e}")
