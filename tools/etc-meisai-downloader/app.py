@@ -726,12 +726,23 @@ class App(_BaseWindow):
                          f"対象日: {', '.join(dates) or '不明'}")
 
                 # 車両ごとに集約 (同一車両が複数日付に出る場合は新しい日付を優先)
-                from collections import OrderedDict
+                from collections import OrderedDict, defaultdict
                 by_no = OrderedDict()
                 for r in records:
                     by_no.setdefault(r["vehicle_no"], []).append(r)
+
+                # 同一現場(日付+現場)に複数車両が割り当てられているか集計。
+                # 該当する車両は運転手を特定できないため空欄にする (顧客・現場は残す)。
+                site_vehicles = defaultdict(set)
+                for r in records:
+                    s = r.get("site", "")
+                    if s:
+                        site_vehicles[(r.get("date", ""), s)].add(r["vehicle_no"])
+                shared_sites = {k for k, nos in site_vehicles.items() if len(nos) >= 2}
+
                 info_by_no = {}
                 multi_list = []
+                shared_driver_cleared = 0
                 for no, recs in by_no.items():
                     latest = max((r.get("date") or "") for r in recs)
                     recs = [r for r in recs if (r.get("date") or "") == latest]
@@ -742,10 +753,17 @@ class App(_BaseWindow):
                     drivers = list(dict.fromkeys(
                         r.get("driver", "") for r in recs if r.get("driver")
                     ))
+                    driver_str = " / ".join(drivers)
+                    # この車両の現場のいずれかが「複数車両の現場」なら運転手を空欄に
+                    veh_keys = {(r.get("date", ""), r.get("site", "")) for r in recs if r.get("site")}
+                    if veh_keys & shared_sites:
+                        if driver_str:
+                            shared_driver_cleared += 1
+                        driver_str = ""
                     info_by_no[no] = {
                         "customer": " / ".join(customers),
                         "site": " / ".join(sites),
-                        "driver": " / ".join(drivers),
+                        "driver": driver_str,
                         "hks_date": latest,
                     }
                     if len(pairs) > 1:
@@ -769,6 +787,8 @@ class App(_BaseWindow):
                 self.after(0, self._refresh_list)
 
                 self.log(f"登録済み車両への反映: {matched} 台に顧客・現場・運転手をセットしました")
+                if shared_driver_cleared:
+                    self.log(f"  うち {shared_driver_cleared} 台は同一現場に複数車両のため運転手を空欄にしました")
                 self.set_status(f"Hks番割の取込が完了しました ({matched} 台に反映)", kind="success")
                 if unmatched:
                     self.log(f"※番割にあるが未登録の車両: {', '.join(sorted(unmatched, key=lambda x: x.zfill(4)))}")
