@@ -30,7 +30,8 @@ except ImportError:
     HAS_TTKB = False
 
 try:
-    from tkcalendar import DateEntry as _TkCalDateEntry
+    from tkcalendar import Calendar as _TkCalendar
+    from tkcalendar import DateEntry as _TkCalDateEntry  # noqa: F401
     HAS_DATEENTRY = True
 except ImportError:
     HAS_DATEENTRY = False
@@ -232,18 +233,21 @@ class App(_BaseWindow):
         _btn(toolbar, "全て解除", lambda: self._set_all(False), style="secondary").pack(side="right", padx=2)
         _btn(toolbar, "全てチェック", lambda: self._set_all(True), style="secondary").pack(side="right", padx=2)
 
-        # Treeview (対象/所属/車両番号/顧客/現場/運転手)
+        # Treeview (対象/備考/車両番号/顧客/現場/運転手)
         tree_frame = ttk.Frame(self.box_list)
         tree_frame.pack(fill="both", expand=True, pady=(4, 4))
+        # 内部キーは互換性のため "dept" のまま (既存 config.json を壊さない)。
+        # 表示上の扱いは「所属」をやめて「備考」(自由記入・空欄可) とする。
         cols = ("on", "dept", "number", "customer", "site", "driver")
-        headers = {"on": "対象", "dept": "所属", "number": "車両番号",
+        headers = {"on": "対象", "dept": "備考", "number": "車両番号",
                    "customer": "顧客", "site": "現場", "driver": "運転手"}
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8, selectmode="browse")
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda col=c: self._sort_by(col))
         self.tree.column("on", width=42, anchor="center", stretch=False)
         self.tree.column("dept", width=80, stretch=False)
-        self.tree.column("number", width=68, anchor="center", stretch=False)
+        # 車両番号列は全角2文字分ほど広げる (68 → 100)
+        self.tree.column("number", width=100, anchor="center", stretch=False)
         self.tree.column("customer", width=150, stretch=False)
         self.tree.column("site", width=180, stretch=True)
         self.tree.column("driver", width=90, stretch=False)
@@ -266,7 +270,7 @@ class App(_BaseWindow):
 
         # --- 単一モード: 1台指定 ---
         self.box_single = ttk.LabelFrame(self.mode_area, text="検索する車両 (1台のみ)", padding=8)
-        ttk.Label(self.box_single, text="所属").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.box_single, text="備考").grid(row=0, column=0, sticky="w")
         self.cb_single_dept = ttk.Combobox(
             self.box_single, textvariable=self.var_single_dept, width=18, values=[])
         self.cb_single_dept.grid(row=0, column=1, padx=4)
@@ -373,7 +377,7 @@ class App(_BaseWindow):
         # --- 車両の新規登録 ---
         regbox = ttk.LabelFrame(root, text="車両の新規登録", padding=8)
         regbox.pack(fill="x", pady=4)
-        ttk.Label(regbox, text="所属").grid(row=0, column=0, sticky="w")
+        ttk.Label(regbox, text="備考").grid(row=0, column=0, sticky="w")
         self.cb_reg_dept = ttk.Combobox(regbox, textvariable=self.var_reg_dept, width=18, values=[])
         self.cb_reg_dept.grid(row=0, column=1, padx=4)
         ttk.Label(regbox, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(12, 0))
@@ -381,7 +385,7 @@ class App(_BaseWindow):
         _btn(regbox, "登録", self._register_vehicle, style="primary").grid(row=0, column=4, padx=8)
         ttk.Label(
             regbox,
-            text="※登録した車両は「メイン」タブの一覧に表示されます。\n"
+            text="※備考は空欄でも登録できます。登録した車両は「メイン」タブの一覧に表示されます。\n"
                  "  変更したいときは一覧から削除してから再登録してください。",
             foreground="#888",
             justify="left",
@@ -394,7 +398,7 @@ class App(_BaseWindow):
         _btn(iobox, "CSVを読み込む", self._import_vehicles, style="secondary").pack(side="left", padx=4)
         ttk.Label(
             iobox,
-            text="形式: 1行目ヘッダ「所属,車両番号」。Excelでの編集・一括作成も可",
+            text="形式: 1行目ヘッダ「備考,車両番号」。Excelでの編集・一括作成も可",
             foreground="#888",
         ).pack(side="left", padx=8)
 
@@ -462,7 +466,7 @@ class App(_BaseWindow):
                     self._ellipsis(v.get("driver", ""), 8),
                 ))
             # ヘッダにソート方向を表示
-            headers = {"on": "対象", "dept": "所属", "number": "車両番号",
+            headers = {"on": "対象", "dept": "備考", "number": "車両番号",
                        "customer": "顧客", "site": "現場", "driver": "運転手"}
             for c, label in headers.items():
                 suffix = ""
@@ -502,7 +506,7 @@ class App(_BaseWindow):
             sv = tk.StringVar(value=v.get(key, ""))
             ttk.Entry(frm, textvariable=sv, width=42).grid(row=r, column=1, padx=6, pady=3)
             vars_[key] = sv
-        ttk.Label(frm, text="※所属・車両番号の変更は削除→再登録で",
+        ttk.Label(frm, text="※備考・車両番号の変更は削除→再登録で",
                   foreground="#888").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         btns = ttk.Frame(frm)
@@ -519,6 +523,12 @@ class App(_BaseWindow):
         _btn(btns, "保存", ok, style="primary").pack(side="right", padx=4)
         dlg.bind("<Return>", lambda e: ok())
         dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        # 画面左上ではなく、今のウィンドウ中央に出す
+        dlg.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
     def _on_tree_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -550,16 +560,16 @@ class App(_BaseWindow):
         self._refresh_list()
 
     def _register_vehicle(self):
-        dept = self.var_reg_dept.get().strip()
+        dept = self.var_reg_dept.get().strip()  # 備考 (空欄可)
         number = self.var_reg_num.get().strip()
-        if not dept or not number:
-            messagebox.showerror("登録エラー", "所属と車両番号の両方を入力してください")
+        if not number:
+            messagebox.showerror("登録エラー", "車両番号を入力してください")
             return
         if not number.isdigit() or len(number) > 4:
             messagebox.showerror("登録エラー", "車両番号はナンバーの下4桁の数字で入力してください")
             return
         if any(v.get("number") == number and v.get("dept") == dept for v in self.vehicles):
-            messagebox.showerror("登録エラー", "同じ所属・車両番号の車両がすでに登録されています")
+            messagebox.showerror("登録エラー", "同じ備考・車両番号の車両がすでに登録されています")
             return
         self.vehicles.append({"enabled": True, "dept": dept, "number": number})
         self.var_reg_dept.set("")
@@ -581,7 +591,7 @@ class App(_BaseWindow):
         import csv
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["所属", "車両番号"])
+            w.writerow(["備考", "車両番号"])
             for v in self.vehicles:
                 w.writerow([v.get("dept", ""), v.get("number", "")])
         messagebox.showinfo("書き出し", f"{len(self.vehicles)} 台を書き出しました:\n{path}")
@@ -611,7 +621,7 @@ class App(_BaseWindow):
                 continue
             dept = row[0].strip()
             number = row[1].strip() if len(row) > 1 else ""
-            if dept == "所属":  # ヘッダ行
+            if dept in ("所属", "備考"):  # ヘッダ行 (旧ヘッダ「所属」も許容)
                 continue
             if not number.isdigit() or len(number) > 4:
                 bad.append(f"{lineno}行目: {dept},{number}")
@@ -692,6 +702,7 @@ class App(_BaseWindow):
                     chosen = self._ask_window_selection_sync(metas)
                     if chosen is None:
                         self.log("Hks取込をキャンセルしました")
+                        self.set_status("Hks番割の取込をキャンセルしました", kind="info")
                         return
                     metas = [metas[i] for i in chosen]
                 self.log(f"{len(metas)} 画面を取り込みます")
@@ -975,18 +986,57 @@ class App(_BaseWindow):
         }
 
     def _make_date_input(self, parent, var):
-        """カレンダー入力 (tkcalendar) があればそれを、なければ Entry を返す"""
+        """日付入力欄。直接入力できる Entry と、カレンダーを開く📅ボタンを並べる。
+
+        旧実装の tkcalendar.DateEntry は枠内でマウスカーソルが消え、
+        カレンダーを開くクリック範囲も狭かったため、両立できるよう作り替えた。
+        tkcalendar が無い環境では Entry だけにフォールバックする。
+        """
+        frame = ttk.Frame(parent)
+        entry = ttk.Entry(frame, textvariable=var, width=11)
+        entry.pack(side="left")
         if HAS_DATEENTRY:
-            try:
-                # tkcalendar.DateEntry は textvariable をネイティブに尊重する
-                de = _TkCalDateEntry(
-                    parent, textvariable=var, date_pattern="yyyy/mm/dd",
-                    width=11, locale="ja_JP", showweeknumbers=False,
-                )
-                return de
-            except Exception:
-                pass
-        return ttk.Entry(parent, textvariable=var, width=12)
+            # 押しやすい大きさのボタンでカレンダーを開く
+            ttk.Button(
+                frame, text="📅", width=3,
+                command=lambda: self._open_calendar_popup(entry, var),
+            ).pack(side="left", padx=(2, 0))
+        return frame
+
+    def _open_calendar_popup(self, anchor, var):
+        """anchor ウィジェットの真下にカレンダーを開き、選んだ日付を var に入れる"""
+        try:
+            cur = self.parse_date(var.get(), "")
+        except Exception:
+            cur = datetime.date.today()
+
+        top = tk.Toplevel(self)
+        top.transient(self)
+        top.title("日付を選択")
+        top.resizable(False, False)
+        cal = _TkCalendar(
+            top, selectmode="day", locale="ja_JP",
+            date_pattern="yyyy/mm/dd", showweeknumbers=False,
+            year=cur.year, month=cur.month, day=cur.day,
+        )
+        cal.pack(padx=8, pady=8)
+
+        def choose(_event=None):
+            var.set(cal.get_date())
+            top.destroy()
+
+        # 日付をダブルクリック / 「決定」/ Enter で確定 (単クリックの月移動では閉じない)
+        cal.bind("<Double-1>", choose)
+        ttk.Button(top, text="決定", command=choose).pack(pady=(0, 8))
+        top.bind("<Return>", choose)
+        top.bind("<Escape>", lambda e: top.destroy())
+
+        # anchor の真下に配置
+        top.update_idletasks()
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height()
+        top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        top.grab_set()
 
     # 期間ショートカット
     def set_this_month(self):

@@ -308,7 +308,7 @@ def _append_history(rows):
     with path.open("a", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         if new_file:
-            w.writerow(["実行日時", "開始日", "終了日", "所属", "車両番号", "結果", "詳細"])
+            w.writerow(["実行日時", "開始日", "終了日", "備考", "車両番号", "結果", "詳細"])
         w.writerows(rows)
 
 
