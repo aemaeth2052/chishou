@@ -385,7 +385,9 @@ class App(_BaseWindow):
         num_lbl.grid(row=0, column=0, sticky="w")
         ttk.Label(num_lbl, text="車両番号(下4桁)").pack(side="left")
         ttk.Label(num_lbl, text="*", foreground="red").pack(side="left", padx=(2, 0))
-        ttk.Entry(regbox, textvariable=self.var_reg_num, width=10).grid(row=0, column=1, padx=4)
+        vcmd = (self.register(self._validate_plate_number), "%P")
+        ttk.Entry(regbox, textvariable=self.var_reg_num, width=10,
+                  validate="key", validatecommand=vcmd).grid(row=0, column=1, padx=4)
         ttk.Label(regbox, text="備考").grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.cb_reg_dept = ttk.Combobox(regbox, textvariable=self.var_reg_dept, width=18, values=[])
         self.cb_reg_dept.grid(row=0, column=3, padx=4)
@@ -570,6 +572,15 @@ class App(_BaseWindow):
             return
         del self.vehicles[idx]
         self._refresh_list()
+
+    @staticmethod
+    def _validate_plate_number(proposed):
+        """車両番号フィールドの入力検証: 半角数字のみ・最大4桁。
+        IME経由の全角数字や記号・かなはこの時点で弾く (空は許可=削除可)。
+        """
+        return proposed == "" or (
+            proposed.isascii() and proposed.isdigit() and len(proposed) <= 4
+        )
 
     def _register_vehicle(self):
         dept = self.var_reg_dept.get().strip()  # 備考 (空欄可)
