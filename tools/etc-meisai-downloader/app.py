@@ -106,6 +106,7 @@ class App(_BaseWindow):
         self.minsize(720, 640)
         self.log_queue = queue.Queue()
         self.running = False
+        self._hks_importing = False
 
         cfg = load_config()
         today = datetime.date.today()
@@ -184,8 +185,7 @@ class App(_BaseWindow):
 
         def on_ready():
             self._chromium_ready = True
-            self.after(0, lambda: self.btn_run.configure(
-                state="normal", text="検索開始"))
+            self.after(0, self._restore_run_button)
             self.log("実行できる状態になりました")
             self.set_status("準備完了。期間と対象を確認したら「検索開始」を押してください", kind="success")
             self.after(0, self._first_run_check)
@@ -710,6 +710,9 @@ class App(_BaseWindow):
     def on_import_hks(self):
         self.btn_hks.configure(state="disabled", text="取込中...")
         _set_btn_style(self.btn_hks, "warning")
+        # 取込中は検索開始を押せないようにする
+        self._hks_importing = True
+        self.btn_run.configure(state="disabled")
         self.set_status("Hks番割を読み取っています...", kind="busy")
 
         def worker():
@@ -824,6 +827,9 @@ class App(_BaseWindow):
                     self.btn_hks.configure(state="normal", text="番割全体表示から取込")
                     _set_btn_style(self.btn_hks, "primary")
                     self._update_hks_status()
+                    # 取込が終わったら検索開始を押せる状態に戻す
+                    self._hks_importing = False
+                    self._restore_run_button()
                 self.after(0, restore)
 
         self._ensure_hks_thread()
@@ -1191,7 +1197,7 @@ class App(_BaseWindow):
         raise ValueError(f"{label}の日付形式が不正です: {s} (例: 2026/06/01)")
 
     def on_run(self):
-        if self.running:
+        if self.running or self._hks_importing:
             return
         try:
             d_from = self.parse_date(self.var_from.get(), "開始日")
@@ -1304,9 +1310,18 @@ class App(_BaseWindow):
         self._last_error = None
         threading.Thread(target=worker, daemon=True).start()
 
+    def _restore_run_button(self):
+        """検索開始ボタンを通常状態へ戻す。
+        検索中・番割取込中・ブラウザ未準備のときは戻さない (誤って押せないように)。
+        """
+        if self.running or self._hks_importing:
+            return
+        if getattr(self, "_chromium_ready", False):
+            self.btn_run.configure(state="normal", text="検索開始")
+
     def on_done(self):
         self.running = False
-        self.btn_run.configure(state="normal", text="検索開始")
+        self._restore_run_button()
         if getattr(self, "_last_error", None):
             self.set_status(f"処理中にエラーが発生しました: {self._last_error}", kind="error")
         else:
