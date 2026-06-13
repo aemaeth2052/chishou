@@ -27,6 +27,7 @@ hiddenimports = (
     + collect_submodules("reportlab")
     + collect_submodules("tkcalendar")
     + collect_submodules("babel")
+    + collect_submodules("PIL")
 )
 
 datas = (

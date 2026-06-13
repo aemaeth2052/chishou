@@ -112,10 +112,10 @@ class App(_BaseWindow):
         self.title("ETC利用明細ダウンローダー")
         self.geometry("800x760")
         self.minsize(720, 640)
-        self._set_app_icon()
         self.log_queue = queue.Queue()
         self.running = False
         self._hks_importing = False
+        self._set_app_icon()
 
         cfg = load_config()
         today = datetime.date.today()
@@ -190,22 +190,54 @@ class App(_BaseWindow):
         assets/icon.png があれば全プラットフォームで iconphoto に使う。
         Windows では assets/icon.ico があればタイトルバー用に併用する。
         画像が無ければ何もしない (既定アイコンのまま)。
+        失敗理由はログに残す (原因切り分け用)。
         """
-        try:
-            png = resource_path("assets/icon.png")
-            if png.exists():
-                # 参照を保持しないと GC でアイコンが消えるため self に持たせる
+        # 探索パス: ソース実行・PyInstaller(_MEIPASS)・exe隣 のいずれでも拾えるように
+        png_candidates = [
+            resource_path("assets/icon.png"),
+            BASE_DIR / "assets" / "icon.png",
+            Path(sys.executable).resolve().parent / "assets" / "icon.png",
+        ]
+        png = next((p for p in png_candidates if p.exists()), None)
+        if png is None:
+            self.log("アイコン: assets/icon.png が見つかりませんでした")
+        else:
+            ok = False
+            # 1) Tk標準のPhotoImage (PNG対応は Tk 8.6 以降)
+            try:
                 self._icon_img = tk.PhotoImage(file=str(png))
                 self.iconphoto(True, self._icon_img)
-        except Exception:
-            pass
+                ok = True
+                self.log(f"アイコンを設定しました: {png}")
+            except Exception as e:
+                self.log(f"アイコン読み込み失敗(Tk標準): {e}")
+                # 2) Pillow があれば変換して再試行 (JPEG実体・特殊PNG・巨大サイズ対策)
+                try:
+                    from PIL import Image, ImageTk
+                    im = Image.open(png).convert("RGBA")
+                    im.thumbnail((256, 256))
+                    self._icon_img = ImageTk.PhotoImage(im)
+                    self.iconphoto(True, self._icon_img)
+                    ok = True
+                    self.log("アイコンを設定しました (Pillow経由)")
+                except ImportError:
+                    self.log("  (Pillow未導入のため変換フォールバックは省略)")
+                except Exception as e2:
+                    self.log(f"アイコン読み込み失敗(Pillow): {e2}")
+            if not ok:
+                self.log("アイコンを設定できませんでした。PNG形式・サイズを確認してください")
         if sys.platform == "win32":
             try:
-                ico = resource_path("assets/icon.ico")
-                if ico.exists():
+                ico_candidates = [
+                    resource_path("assets/icon.ico"),
+                    BASE_DIR / "assets" / "icon.ico",
+                    Path(sys.executable).resolve().parent / "assets" / "icon.ico",
+                ]
+                ico = next((p for p in ico_candidates if p.exists()), None)
+                if ico:
                     self.iconbitmap(default=str(ico))
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"アイコン(.ico)設定失敗: {e}")
 
     # ============================================================ ブラウザ準備
     def _ensure_browser(self):
