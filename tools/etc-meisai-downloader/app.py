@@ -110,7 +110,8 @@ class App(_BaseWindow):
         today = datetime.date.today()
         first = today.replace(day=1)
 
-        # 旧 "name" は "dept" に移行
+        # 旧 "name" は "dept" に移行。
+        # 顧客・現場・運転手は番割由来 (日替わり) なので起動時は読み込まない。
         self.vehicles = []
         for v in cfg.get("vehicles", []):
             self.vehicles.append({
@@ -149,9 +150,10 @@ class App(_BaseWindow):
         self.var_reg_dept = tk.StringVar()
         self.var_reg_num = tk.StringVar()
 
-        # Hks番割から取り込んだ全レコード (各レコードに office/date/update_dt 等を含む)
-        self.hks_records = cfg.get("hks_records", []) or []
-        self.hks_imported_at = cfg.get("hks_imported_at", "")
+        # Hks番割は日替わりのため、起動時は常に未取込から始める
+        # (前回の取込結果は引き継がない)
+        self.hks_records = []
+        self.hks_imported_at = ""
         self.var_hks_status = tk.StringVar()
         self._update_hks_status()
 
@@ -202,20 +204,6 @@ class App(_BaseWindow):
 
     # ============================================================ メインタブ
     def _build_main_tab(self, root):
-        # --- 使い方ガイド (上部に常時表示) ---
-        guide = ttk.Frame(root)
-        guide.pack(fill="x", pady=(0, 6))
-        ttk.Label(
-            guide,
-            text="使い方:  ①「Hks番割から取込」  →  ②期間を確認  →  ③「実行」",
-            font=("", 10, "bold"),
-        ).pack(anchor="w")
-        ttk.Label(
-            guide,
-            text="初回は「設定」タブでログイン情報と保存先を入力してください。",
-            foreground="#666",
-        ).pack(anchor="w")
-
         # --- 検索対象 (横並び、幅を抑える) ---
         mode_row = ttk.Frame(root)
         mode_row.pack(fill="x", pady=(0, 4))
@@ -814,20 +802,46 @@ class App(_BaseWindow):
 
         ttk.Label(
             frm,
-            text=f"番割予定表が {len(metas)} 件見つかりました。取り込むものを選んでください。",
+            text=f"番割予定表が {len(metas)} 件見つかりました。取り込むものを選んでください。\n"
+                 "(対象列をクリックでON/OFF)",
         ).pack(anchor="w", pady=(0, 10))
 
-        list_frame = ttk.Frame(frm)
-        list_frame.pack(fill="both", expand=True)
+        tree_frame = ttk.Frame(frm)
+        tree_frame.pack(fill="both", expand=True)
+        cols = ("on", "office", "date", "update")
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                            height=min(len(metas), 12), selectmode="none")
+        tree.heading("on", text="対象")
+        tree.heading("office", text="営業所")
+        tree.heading("date", text="日付")
+        tree.heading("update", text="更新")
+        tree.column("on", width=50, anchor="center", stretch=False)
+        tree.column("office", width=200, anchor="w", stretch=False)
+        tree.column("date", width=110, anchor="center", stretch=False)
+        tree.column("update", width=80, anchor="center", stretch=False)
+        tree.pack(fill="both", expand=True)
 
-        vars_ = []
-        for i, m in enumerate(metas):
-            v = tk.BooleanVar(value=True)
-            vars_.append(v)
-            label = (f"  {m.get('office') or '営業所不明':<18}"
-                     f"   {m.get('date') or '日付不明':<12}"
-                     f"   更新 {m.get('update_hhmm') or '不明'}")
-            ttk.Checkbutton(list_frame, text=label, variable=v).pack(anchor="w", pady=3)
+        checked = [True] * len(metas)
+
+        def render():
+            tree.delete(*tree.get_children())
+            for i, m in enumerate(metas):
+                tree.insert("", "end", iid=str(i), values=(
+                    "☑" if checked[i] else "☐",
+                    m.get("office") or "営業所不明",
+                    m.get("date") or "日付不明",
+                    m.get("update_hhmm") or "不明",
+                ))
+
+        def on_click(event):
+            row = tree.identify_row(event.y)
+            if row:
+                i = int(row)
+                checked[i] = not checked[i]
+                render()
+
+        tree.bind("<Button-1>", on_click)
+        render()
 
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(14, 0))
@@ -835,15 +849,17 @@ class App(_BaseWindow):
         result = {"indices": None}
 
         def all_on():
-            for v in vars_:
-                v.set(True)
+            for i in range(len(checked)):
+                checked[i] = True
+            render()
 
         def all_off():
-            for v in vars_:
-                v.set(False)
+            for i in range(len(checked)):
+                checked[i] = False
+            render()
 
         def ok():
-            idx = [i for i, v in enumerate(vars_) if v.get()]
+            idx = [i for i, c in enumerate(checked) if c]
             if not idx:
                 messagebox.showwarning("選択なし", "少なくとも1件選んでください")
                 return
@@ -965,7 +981,7 @@ class App(_BaseWindow):
                 # tkcalendar.DateEntry は textvariable をネイティブに尊重する
                 de = _TkCalDateEntry(
                     parent, textvariable=var, date_pattern="yyyy/mm/dd",
-                    width=11, locale="ja_JP",
+                    width=11, locale="ja_JP", showweeknumbers=False,
                 )
                 return de
             except Exception:
