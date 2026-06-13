@@ -879,6 +879,8 @@ class App(_BaseWindow):
         tree.column("office", width=200, anchor="w", stretch=False)
         tree.column("date", width=110, anchor="center", stretch=False)
         tree.column("update", width=80, anchor="center", stretch=False)
+        # チェック済みの行をうっすら水色でハイライトする
+        tree.tag_configure("checked", background="#e6f3fb")
         tree.pack(fill="both", expand=True)
 
         # 検索対象が単日なら、その日付の番割だけを初期選択する。
@@ -900,7 +902,7 @@ class App(_BaseWindow):
         def render():
             tree.delete(*tree.get_children())
             for i, m in enumerate(metas):
-                tree.insert("", "end", iid=str(i), values=(
+                tree.insert("", "end", iid=str(i), tags=("checked",) if checked[i] else (), values=(
                     "☑" if checked[i] else "☐",
                     m.get("office") or "営業所不明",
                     m.get("date") or "日付不明",
