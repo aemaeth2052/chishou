@@ -95,8 +95,8 @@ class App(_BaseWindow):
         else:
             super().__init__()
         self.title("ETC利用明細ダウンローダー")
-        self.geometry("780x620")
-        self.minsize(700, 540)
+        self.geometry("800x760")
+        self.minsize(720, 640)
         self.log_queue = queue.Queue()
         self.running = False
 
@@ -608,6 +608,30 @@ class App(_BaseWindow):
         messagebox.showinfo("読み込み結果", msg)
 
     # ============================================================ Hks取込
+    # pywinauto(COM) はスレッドのアパートメントに紐づくため、取込処理は
+    # 常駐の専用スレッド1本で行う (毎回新スレッドだと2回目以降が失敗する)
+    def _ensure_hks_thread(self):
+        if getattr(self, "_hks_thread", None) is None or not self._hks_thread.is_alive():
+            self._hks_jobs = queue.Queue()
+
+            def loop():
+                try:
+                    import comtypes
+                    comtypes.CoInitialize()
+                except Exception:
+                    pass
+                while True:
+                    job = self._hks_jobs.get()
+                    if job is None:
+                        return
+                    try:
+                        job()
+                    except Exception as e:
+                        self.log(f"Hks取込エラー: {e}")
+
+            self._hks_thread = threading.Thread(target=loop, daemon=True)
+            self._hks_thread.start()
+
     def _hks_dates(self):
         return sorted({r.get("date") for r in self.hks_records if r.get("date")})
 
@@ -636,11 +660,6 @@ class App(_BaseWindow):
 
         def worker():
             try:
-                try:
-                    import comtypes
-                    comtypes.CoInitialize()
-                except Exception:
-                    pass
                 import hks_reader
                 metas = hks_reader.enumerate_windows()
                 if not metas:
@@ -675,8 +694,10 @@ class App(_BaseWindow):
                 for no, recs in by_no.items():
                     latest = max((r.get("date") or "") for r in recs)
                     recs = [r for r in recs if (r.get("date") or "") == latest]
-                    customers = list(dict.fromkeys(r["customer"] for r in recs))
-                    sites = list(dict.fromkeys(r["site"] for r in recs))
+                    # 同顧客・同現場の重複は1件扱い (別営業所の乗合は複数現場ではない)
+                    pairs = list(dict.fromkeys((r["customer"], r["site"]) for r in recs))
+                    customers = list(dict.fromkeys(c for c, _ in pairs))
+                    sites = list(dict.fromkeys(s for _, s in pairs))
                     drivers = list(dict.fromkeys(
                         r.get("driver", "") for r in recs if r.get("driver")
                     ))
@@ -686,7 +707,7 @@ class App(_BaseWindow):
                         "driver": " / ".join(drivers),
                         "hks_date": latest,
                     }
-                    if len(recs) > 1:
+                    if len(pairs) > 1:
                         multi_list.append(f"{latest} 車両{no}: " + " / ".join(sites))
 
                 # 登録済み車両リストへ反映
@@ -727,7 +748,8 @@ class App(_BaseWindow):
                     self._update_hks_status()
                 self.after(0, restore)
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._ensure_hks_thread()
+        self._hks_jobs.put(worker)
 
     def _ask_window_selection_sync(self, metas):
         """ワーカースレッドから呼ぶ。メインスレッドで選択ダイアログを表示して結果を待つ。
@@ -754,12 +776,9 @@ class App(_BaseWindow):
         frm = ttk.Frame(dlg, padding=14)
         frm.pack(fill="both", expand=True)
 
-        big_font = ("", 12)
-        bigger_font = ("", 13, "bold")
         ttk.Label(
             frm,
-            text=f"番割予定表が {len(metas)} 件見つかりました。\n取り込むものを選んでください。",
-            font=bigger_font,
+            text=f"番割予定表が {len(metas)} 件見つかりました。取り込むものを選んでください。",
         ).pack(anchor="w", pady=(0, 10))
 
         list_frame = ttk.Frame(frm)
@@ -772,21 +791,7 @@ class App(_BaseWindow):
             label = (f"  {m.get('office') or '営業所不明':<18}"
                      f"   {m.get('date') or '日付不明':<12}"
                      f"   更新 {m.get('update_hhmm') or '不明'}")
-            ttk.Checkbutton(list_frame, text=label, variable=v).pack(anchor="w", pady=4)
-            # フォントを少し大きく
-            try:
-                list_frame.winfo_children()[-1].configure()
-            except Exception:
-                pass
-
-        # Checkbutton のフォント変更 (Style経由)
-        try:
-            style = ttk.Style()
-            style.configure("Big.TCheckbutton", font=big_font)
-            for cb in list_frame.winfo_children():
-                cb.configure(style="Big.TCheckbutton")
-        except Exception:
-            pass
+            ttk.Checkbutton(list_frame, text=label, variable=v).pack(anchor="w", pady=3)
 
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(14, 0))
