@@ -44,6 +44,14 @@ migrate_old_data(BASE_DIR)
 CONFIG_PATH = config_path()
 
 
+def resource_path(rel: str) -> Path:
+    """同梱リソース(アイコン等)の絶対パスを返す。
+    PyInstaller の onedir 配布では sys._MEIPASS 配下に展開される。
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    return (Path(base) if base else BASE_DIR) / rel
+
+
 def load_config():
     if CONFIG_PATH.exists():
         try:
@@ -104,6 +112,7 @@ class App(_BaseWindow):
         self.title("ETC利用明細ダウンローダー")
         self.geometry("800x760")
         self.minsize(720, 640)
+        self._set_app_icon()
         self.log_queue = queue.Queue()
         self.running = False
         self._hks_importing = False
@@ -175,6 +184,28 @@ class App(_BaseWindow):
         self.after(100, self.poll_log)
         self._chromium_ready = False
         self._ensure_browser()
+
+    def _set_app_icon(self):
+        """ウインドウ/タスクバーのアイコンを設定する。
+        assets/icon.png があれば全プラットフォームで iconphoto に使う。
+        Windows では assets/icon.ico があればタイトルバー用に併用する。
+        画像が無ければ何もしない (既定アイコンのまま)。
+        """
+        try:
+            png = resource_path("assets/icon.png")
+            if png.exists():
+                # 参照を保持しないと GC でアイコンが消えるため self に持たせる
+                self._icon_img = tk.PhotoImage(file=str(png))
+                self.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
+        if sys.platform == "win32":
+            try:
+                ico = resource_path("assets/icon.ico")
+                if ico.exists():
+                    self.iconbitmap(default=str(ico))
+            except Exception:
+                pass
 
     # ============================================================ ブラウザ準備
     def _ensure_browser(self):
