@@ -1025,11 +1025,11 @@ class App(_BaseWindow):
         return kept
 
     def _stamp_size(self):
-        """文字サイズ設定を安全に読む (空欄・異常値は既定27、6〜72に丸め)"""
+        """文字サイズ設定を安全に読む (空欄・異常値は既定14、6〜72に丸め)"""
         try:
             v = int(self.var_stamp_size.get())
         except Exception:
-            v = 27
+            v = 14
         return max(6, min(v, 72))
 
     def _save_now(self):
@@ -1052,8 +1052,8 @@ class App(_BaseWindow):
             "stamp_site": self.var_stamp_site.get(),
             "stamp_driver": self.var_stamp_driver.get(),
             "stamp_font_size": self._stamp_size(),
-            "hks_records": self.hks_records,
-            "hks_imported_at": self.hks_imported_at,
+            # 番割(hks_records / hks_imported_at)は日替わりで起動時に必ず未取込から
+            # 始める設計のため、config.json には保存しない (書いても読み戻さないため無駄)。
             "single": {
                 "dept": self.var_single_dept.get().strip(),
                 "number": self.var_single_num.get().strip(),

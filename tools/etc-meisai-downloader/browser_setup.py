@@ -18,10 +18,21 @@ from playwright.sync_api import sync_playwright
 
 
 def chromium_installed() -> bool:
-    """Chromium が利用可能なら True"""
+    """Chromium が利用可能なら True。
+
+    起動のたびにブラウザを立ち上げて閉じると毎回数秒待たされるので、
+    まず実行ファイルがディスク上にあるかだけを高速に確認する。
+    パスが取れない/見つからないときだけ、従来どおり実際に起動して確かめる。
+    """
     try:
         with sync_playwright() as p:
-            # 起動を試みる (失敗すれば未インストール扱い)
+            try:
+                exe = p.chromium.executable_path
+            except Exception:
+                exe = None
+            if exe and os.path.exists(exe):
+                return True
+            # 実行ファイルが見つからないときだけ、実際に起動して最終確認する
             b = p.chromium.launch(headless=True)
             b.close()
         return True
