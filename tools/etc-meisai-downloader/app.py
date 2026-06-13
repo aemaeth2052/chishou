@@ -233,24 +233,24 @@ class App(_BaseWindow):
         _btn(toolbar, "全て解除", lambda: self._set_all(False), style="secondary").pack(side="right", padx=2)
         _btn(toolbar, "全てチェック", lambda: self._set_all(True), style="secondary").pack(side="right", padx=2)
 
-        # Treeview (対象/備考/車両番号/顧客/現場/運転手)
+        # Treeview (対象/車両番号/顧客/現場/運転手/備考)
         tree_frame = ttk.Frame(self.box_list)
         tree_frame.pack(fill="both", expand=True, pady=(4, 4))
         # 内部キーは互換性のため "dept" のまま (既存 config.json を壊さない)。
         # 表示上の扱いは「所属」をやめて「備考」(自由記入・空欄可) とする。
-        cols = ("on", "dept", "number", "customer", "site", "driver")
-        headers = {"on": "対象", "dept": "備考", "number": "車両番号",
-                   "customer": "顧客", "site": "現場", "driver": "運転手"}
+        cols = ("on", "number", "customer", "site", "driver", "dept")
+        headers = {"on": "対象", "number": "車両番号", "customer": "顧客",
+                   "site": "現場", "driver": "運転手", "dept": "備考"}
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8, selectmode="browse")
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda col=c: self._sort_by(col))
         self.tree.column("on", width=42, anchor="center", stretch=False)
-        self.tree.column("dept", width=80, stretch=False)
         # 車両番号列は全角2文字分ほど広げる (68 → 100)
         self.tree.column("number", width=100, anchor="center", stretch=False)
         self.tree.column("customer", width=150, stretch=False)
         self.tree.column("site", width=180, stretch=True)
         self.tree.column("driver", width=90, stretch=False)
+        self.tree.column("dept", width=100, stretch=False)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -270,12 +270,12 @@ class App(_BaseWindow):
 
         # --- 単一モード: 1台指定 ---
         self.box_single = ttk.LabelFrame(self.mode_area, text="検索する車両 (1台のみ)", padding=8)
-        ttk.Label(self.box_single, text="備考").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.box_single, text="車両番号(下4桁)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.box_single, textvariable=self.var_single_num, width=10).grid(row=0, column=1, padx=4)
+        ttk.Label(self.box_single, text="備考").grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.cb_single_dept = ttk.Combobox(
             self.box_single, textvariable=self.var_single_dept, width=18, values=[])
-        self.cb_single_dept.grid(row=0, column=1, padx=4)
-        ttk.Label(self.box_single, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(12, 0))
-        ttk.Entry(self.box_single, textvariable=self.var_single_num, width=10).grid(row=0, column=3, padx=4)
+        self.cb_single_dept.grid(row=0, column=3, padx=4)
         ttk.Label(
             self.box_single,
             text="※この1台のみ検索します。登録リストには追加されません",
@@ -377,15 +377,19 @@ class App(_BaseWindow):
         # --- 車両の新規登録 ---
         regbox = ttk.LabelFrame(root, text="車両の新規登録", padding=8)
         regbox.pack(fill="x", pady=4)
-        ttk.Label(regbox, text="備考").grid(row=0, column=0, sticky="w")
+        # 車両番号は必須 → ラベルに赤い「*」を添える
+        num_lbl = ttk.Frame(regbox)
+        num_lbl.grid(row=0, column=0, sticky="w")
+        ttk.Label(num_lbl, text="車両番号(下4桁)").pack(side="left")
+        ttk.Label(num_lbl, text="*", foreground="red").pack(side="left", padx=(2, 0))
+        ttk.Entry(regbox, textvariable=self.var_reg_num, width=10).grid(row=0, column=1, padx=4)
+        ttk.Label(regbox, text="備考").grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.cb_reg_dept = ttk.Combobox(regbox, textvariable=self.var_reg_dept, width=18, values=[])
-        self.cb_reg_dept.grid(row=0, column=1, padx=4)
-        ttk.Label(regbox, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(12, 0))
-        ttk.Entry(regbox, textvariable=self.var_reg_num, width=10).grid(row=0, column=3, padx=4)
+        self.cb_reg_dept.grid(row=0, column=3, padx=4)
         _btn(regbox, "登録", self._register_vehicle, style="primary").grid(row=0, column=4, padx=8)
         ttk.Label(
             regbox,
-            text="※備考は空欄でも登録できます。登録した車両は「メイン」タブの一覧に表示されます。\n"
+            text="※登録した車両は「メイン」タブの一覧に表示されます。\n"
                  "  変更したいときは一覧から削除してから再登録してください。",
             foreground="#888",
             justify="left",
@@ -460,14 +464,15 @@ class App(_BaseWindow):
                 v = self.vehicles[idx]
                 mark = "☑" if v.get("enabled", True) else "☐"
                 self.tree.insert("", "end", iid=str(idx), values=(
-                    mark, v.get("dept", ""), v.get("number", ""),
+                    mark, v.get("number", ""),
                     self._ellipsis(v.get("customer", ""), 14),
                     self._ellipsis(v.get("site", ""), 18),
                     self._ellipsis(v.get("driver", ""), 8),
+                    v.get("dept", ""),
                 ))
             # ヘッダにソート方向を表示
-            headers = {"on": "対象", "dept": "備考", "number": "車両番号",
-                       "customer": "顧客", "site": "現場", "driver": "運転手"}
+            headers = {"on": "対象", "number": "車両番号", "customer": "顧客",
+                       "site": "現場", "driver": "運転手", "dept": "備考"}
             for c, label in headers.items():
                 suffix = ""
                 if c == self._sort_col:
@@ -491,10 +496,12 @@ class App(_BaseWindow):
         idx = int(item)
         v = self.vehicles[idx]
 
+        _note = v.get("dept", "")
         dlg = tk.Toplevel(self)
-        dlg.title(f"編集: {v.get('dept', '')} / 車両{v.get('number', '')}")
+        # 位置確定までは隠しておく (一瞬左上に出てから移動する見え方を防ぐ)
+        dlg.withdraw()
+        dlg.title(f"編集: 車両{v.get('number', '')}" + (f" / {_note}" if _note else ""))
         dlg.transient(self)
-        dlg.grab_set()
         dlg.resizable(False, False)
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
@@ -529,6 +536,8 @@ class App(_BaseWindow):
         x = self.winfo_rootx() + (self.winfo_width() - dlg.winfo_width()) // 2
         y = self.winfo_rooty() + (self.winfo_height() - dlg.winfo_height()) // 2
         dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dlg.deiconify()
+        dlg.grab_set()
 
     def _on_tree_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -568,8 +577,8 @@ class App(_BaseWindow):
         if not number.isdigit() or len(number) > 4:
             messagebox.showerror("登録エラー", "車両番号はナンバーの下4桁の数字で入力してください")
             return
-        if any(v.get("number") == number and v.get("dept") == dept for v in self.vehicles):
-            messagebox.showerror("登録エラー", "同じ備考・車両番号の車両がすでに登録されています")
+        if any(v.get("number") == number for v in self.vehicles):
+            messagebox.showerror("登録エラー", "同じ車両番号の車両がすでに登録されています")
             return
         self.vehicles.append({"enabled": True, "dept": dept, "number": number})
         self.var_reg_dept.set("")
@@ -626,7 +635,7 @@ class App(_BaseWindow):
             if not number.isdigit() or len(number) > 4:
                 bad.append(f"{lineno}行目: {dept},{number}")
                 continue
-            if any(v.get("number") == number and v.get("dept") == dept for v in self.vehicles):
+            if any(v.get("number") == number for v in self.vehicles):
                 skipped += 1
                 continue
             self.vehicles.append({"enabled": True, "dept": dept, "number": number})
@@ -1011,6 +1020,8 @@ class App(_BaseWindow):
             cur = datetime.date.today()
 
         top = tk.Toplevel(self)
+        # 位置確定までは隠しておく (一瞬左上に出てから移動する見え方を防ぐ)
+        top.withdraw()
         top.transient(self)
         top.title("日付を選択")
         top.resizable(False, False)
@@ -1031,11 +1042,12 @@ class App(_BaseWindow):
         top.bind("<Return>", choose)
         top.bind("<Escape>", lambda e: top.destroy())
 
-        # anchor の真下に配置
+        # anchor の真下に配置してから表示する
         top.update_idletasks()
         x = anchor.winfo_rootx()
         y = anchor.winfo_rooty() + anchor.winfo_height()
         top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        top.deiconify()
         top.grab_set()
 
     # 期間ショートカット
