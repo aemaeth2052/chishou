@@ -16,12 +16,16 @@ hiddenimports = (
     + collect_submodules("comtypes")
     + collect_submodules("pypdf")
     + collect_submodules("reportlab")
+    + collect_submodules("tkcalendar")
+    + collect_submodules("babel")
 )
 
 datas = (
     collect_data_files("ttkbootstrap")
     + collect_data_files("playwright")
     + collect_data_files("reportlab")
+    + collect_data_files("tkcalendar")
+    + collect_data_files("babel")
 )
 
 a = Analysis(

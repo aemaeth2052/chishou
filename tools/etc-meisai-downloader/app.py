@@ -29,6 +29,12 @@ except ImportError:
     _BaseWindow = tk.Tk
     HAS_TTKB = False
 
+try:
+    from tkcalendar import DateEntry as _TkCalDateEntry
+    HAS_DATEENTRY = True
+except ImportError:
+    HAS_DATEENTRY = False
+
 import browser_setup
 import downloader
 
@@ -91,7 +97,7 @@ def _set_btn_style(btn, style):
 class App(_BaseWindow):
     def __init__(self):
         if HAS_TTKB:
-            super().__init__(themename="cosmo")
+            super().__init__(themename="yeti")
         else:
             super().__init__()
         self.title("ETC利用明細ダウンローダー")
@@ -170,16 +176,20 @@ class App(_BaseWindow):
     def _ensure_browser(self):
         """Chromium の有無を確認し、未インストールなら初回ダウンロード"""
         self.btn_run.configure(state="disabled", text="ブラウザ確認中...")
+        self.set_status("ブラウザの準備を確認しています...", kind="busy")
         self.log("ブラウザの準備状況を確認しています...")
 
         def on_ready():
             self._chromium_ready = True
             self.after(0, lambda: self.btn_run.configure(
-                state="normal", text="▶ 実行" if HAS_TTKB else "実行"))
+                state="normal", text="実行"))
             self.log("実行できる状態になりました")
+            self.set_status("準備完了。期間と対象を確認したら「実行」を押してください", kind="success")
+            self.after(0, self._first_run_check)
 
         def on_fail():
             self.after(0, lambda: self.btn_run.configure(state="disabled", text="ブラウザ未準備"))
+            self.set_status("ブラウザの準備に失敗しました。管理者に連絡してください", kind="error")
             self.after(0, lambda: messagebox.showerror(
                 "ブラウザの準備に失敗しました",
                 "ブラウザ(Chromium)のダウンロードに失敗しました。\n"
@@ -192,6 +202,20 @@ class App(_BaseWindow):
 
     # ============================================================ メインタブ
     def _build_main_tab(self, root):
+        # --- 使い方ガイド (上部に常時表示) ---
+        guide = ttk.Frame(root)
+        guide.pack(fill="x", pady=(0, 6))
+        ttk.Label(
+            guide,
+            text="使い方:  ①「Hks番割から取込」  →  ②期間を確認  →  ③「実行」",
+            font=("", 10, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            guide,
+            text="初回は「設定」タブでログイン情報と保存先を入力してください。",
+            foreground="#666",
+        ).pack(anchor="w")
+
         # --- 検索対象 (横並び、幅を抑える) ---
         mode_row = ttk.Frame(root)
         mode_row.pack(fill="x", pady=(0, 4))
@@ -274,12 +298,12 @@ class App(_BaseWindow):
         ttk.Label(hks_row, textvariable=self.var_hks_status, foreground="#888").pack(side="left", padx=8)
 
         # --- 期間 ---
-        box2 = ttk.LabelFrame(root, text="検索期間 (YYYY/MM/DD ※過去62日以内)", padding=6)
+        box2 = ttk.LabelFrame(root, text="検索期間 (過去62日以内)", padding=6)
         box2.pack(fill="x", pady=4)
         ttk.Label(box2, text="開始").grid(row=0, column=0, sticky="w")
-        ttk.Entry(box2, textvariable=self.var_from, width=12).grid(row=0, column=1, padx=4)
+        self._make_date_input(box2, self.var_from).grid(row=0, column=1, padx=4)
         ttk.Label(box2, text="〜 終了").grid(row=0, column=2, sticky="w")
-        ttk.Entry(box2, textvariable=self.var_to, width=12).grid(row=0, column=3, padx=4)
+        self._make_date_input(box2, self.var_to).grid(row=0, column=3, padx=4)
         ttk.Button(box2, text="今月", command=self.set_this_month, width=5).grid(row=0, column=4, padx=2)
         ttk.Button(box2, text="先月", command=self.set_last_month, width=5).grid(row=0, column=5, padx=2)
         ttk.Button(box2, text="昨日", command=self.set_yesterday, width=5).grid(row=0, column=6, padx=2)
@@ -297,9 +321,17 @@ class App(_BaseWindow):
                 runrow, text="ブラウザの動きを表示する",
                 variable=self.var_show,
             ).pack(side="left")
-        self.btn_run = _btn(runrow, "▶ 実行" if HAS_TTKB else "実行", self.on_run, style="success", width=14)
+        self.btn_run = _btn(runrow, "実行", self.on_run, style="success", width=14)
         self.btn_run.pack(side="right", padx=4)
-        _btn(runrow, "📂 保存先を開く", lambda: open_folder(self.var_dir.get()), style="secondary").pack(side="right", padx=4)
+        _btn(runrow, "保存先を開く", lambda: open_folder(self.var_dir.get()), style="secondary").pack(side="right", padx=4)
+
+        # --- ステータス帯 (重要メッセージを色付きで表示) ---
+        self.status_bar = tk.Label(
+            root, text="準備しています...", anchor="w",
+            bg="#cce6ff", fg="#003366", padx=10, pady=6,
+            font=("", 10, "bold"),
+        )
+        self.status_bar.pack(fill="x", pady=(6, 2))
 
         # --- ログ ---
         self.log_text = scrolledtext.ScrolledText(root, height=8, state="disabled")
@@ -324,7 +356,7 @@ class App(_BaseWindow):
         box3.pack(fill="x", pady=4)
         ttk.Entry(box3, textvariable=self.var_dir, width=58).grid(row=0, column=0, sticky="we", padx=2)
         ttk.Button(box3, text="参照...", command=self.browse_dir).grid(row=0, column=1, padx=4)
-        _btn(box3, "📂 開く", lambda: open_folder(self.var_dir.get()), style="secondary").grid(row=0, column=2, padx=2)
+        _btn(box3, "開く", lambda: open_folder(self.var_dir.get()), style="secondary").grid(row=0, column=2, padx=2)
         box3.columnconfigure(0, weight=1)
 
         # --- 同名ファイルの扱い ---
@@ -358,7 +390,7 @@ class App(_BaseWindow):
         self.cb_reg_dept.grid(row=0, column=1, padx=4)
         ttk.Label(regbox, text="車両番号(下4桁)").grid(row=0, column=2, sticky="w", padx=(12, 0))
         ttk.Entry(regbox, textvariable=self.var_reg_num, width=10).grid(row=0, column=3, padx=4)
-        _btn(regbox, "＋ 登録", self._register_vehicle, style="primary").grid(row=0, column=4, padx=8)
+        _btn(regbox, "登録", self._register_vehicle, style="primary").grid(row=0, column=4, padx=8)
         ttk.Label(
             regbox,
             text="※登録した車両は「メイン」タブの一覧に表示されます。\n"
@@ -370,8 +402,8 @@ class App(_BaseWindow):
         # --- 車両リストの受け渡し ---
         iobox = ttk.LabelFrame(root, text="車両リストの受け渡し (別PCへの配布用)", padding=8)
         iobox.pack(fill="x", pady=4)
-        _btn(iobox, "📤 CSVに書き出す", self._export_vehicles, style="secondary").pack(side="left", padx=4)
-        _btn(iobox, "📥 CSVを読み込む", self._import_vehicles, style="secondary").pack(side="left", padx=4)
+        _btn(iobox, "CSVに書き出す", self._export_vehicles, style="secondary").pack(side="left", padx=4)
+        _btn(iobox, "CSVを読み込む", self._import_vehicles, style="secondary").pack(side="left", padx=4)
         ttk.Label(
             iobox,
             text="形式: 1行目ヘッダ「所属,車両番号」。Excelでの編集・一括作成も可",
@@ -381,7 +413,7 @@ class App(_BaseWindow):
         # 設定保存ボタン
         save_row = ttk.Frame(root)
         save_row.pack(fill="x", pady=8)
-        _btn(save_row, "💾 設定を保存", self._save_now, style="primary").pack(side="right")
+        _btn(save_row, "設定を保存", self._save_now, style="primary").pack(side="right")
 
     # ============================================================ 共通処理
     def _refresh_mode(self):
@@ -657,6 +689,7 @@ class App(_BaseWindow):
     def on_import_hks(self):
         self.btn_hks.configure(state="disabled", text="取込中...")
         _set_btn_style(self.btn_hks, "warning")
+        self.set_status("Hks番割を読み取っています...", kind="busy")
 
         def worker():
             try:
@@ -728,6 +761,7 @@ class App(_BaseWindow):
                 self.after(0, self._refresh_list)
 
                 self.log(f"登録済み車両への反映: {matched} 台に顧客・現場・運転手をセットしました")
+                self.set_status(f"Hks番割の取込が完了しました ({matched} 台に反映)", kind="success")
                 if unmatched:
                     self.log(f"※番割にあるが未登録の車両: {', '.join(sorted(unmatched, key=lambda x: x.zfill(4)))}")
                 if multi_list:
@@ -739,8 +773,10 @@ class App(_BaseWindow):
                         + "\n".join(multi_list)))
             except ImportError:
                 self.log("エラー: pywinauto がインストールされていません。setup.bat を再実行してください")
+                self.set_status("ライブラリが不足しています。setup.bat を再実行してください", kind="error")
             except Exception as e:
                 self.log(f"Hks取込エラー: {e}")
+                self.set_status(f"Hks取込に失敗しました: {e}", kind="error")
             finally:
                 def restore():
                     self.btn_hks.configure(state="normal", text="Hks番割から取込")
@@ -896,6 +932,7 @@ class App(_BaseWindow):
 
     def _save_now(self):
         save_config(self._current_config())
+        self._refresh_settings_badge()
         messagebox.showinfo("保存", "設定を保存しました")
 
     def _current_config(self):
@@ -921,6 +958,20 @@ class App(_BaseWindow):
             },
         }
 
+    def _make_date_input(self, parent, var):
+        """カレンダー入力 (tkcalendar) があればそれを、なければ Entry を返す"""
+        if HAS_DATEENTRY:
+            try:
+                # tkcalendar.DateEntry は textvariable をネイティブに尊重する
+                de = _TkCalDateEntry(
+                    parent, textvariable=var, date_pattern="yyyy/mm/dd",
+                    width=11, locale="ja_JP",
+                )
+                return de
+            except Exception:
+                pass
+        return ttk.Entry(parent, textvariable=var, width=12)
+
     # 期間ショートカット
     def set_this_month(self):
         today = datetime.date.today()
@@ -942,6 +993,43 @@ class App(_BaseWindow):
         d = filedialog.askdirectory(initialdir=self.var_dir.get() or str(Path.home()))
         if d:
             self.var_dir.set(d)
+
+    def _first_run_check(self):
+        """ログイン情報が未入力なら案内する (起動時1回のみ)"""
+        if getattr(self, "_first_run_done", False):
+            return
+        self._first_run_done = True
+        self._refresh_settings_badge()
+        if not self.var_id.get().strip() or not self.var_pw.get():
+            if messagebox.askyesno(
+                "初回設定のお願い",
+                "ETC利用照会サービスのID・パスワードがまだ設定されていません。\n"
+                "「設定」タブで入力してください。\n\n"
+                "今すぐ設定タブを開きますか？",
+            ):
+                self.nb.select(self.tab_settings)
+
+    def _refresh_settings_badge(self):
+        """ログイン情報が未入力なら設定タブのラベルに ● を付ける"""
+        need = not (self.var_id.get().strip() and self.var_pw.get())
+        try:
+            self.nb.tab(self.tab_settings, text="  設定 ●  " if need else "  設定  ")
+        except Exception:
+            pass
+
+    def set_status(self, text, kind="info"):
+        """ステータス帯を更新する。kind: info / busy / success / warning / error"""
+        palette = {
+            "info":    ("#cce6ff", "#003366"),
+            "busy":    ("#fff3cd", "#856404"),
+            "success": ("#d4edda", "#155724"),
+            "warning": ("#fff3cd", "#856404"),
+            "error":   ("#f8d7da", "#721c24"),
+        }
+        bg, fg = palette.get(kind, palette["info"])
+        def apply():
+            self.status_bar.configure(text=text, bg=bg, fg=fg)
+        self.after(0, apply)
 
     def log(self, msg):
         self.log_queue.put(msg)
@@ -1051,6 +1139,7 @@ class App(_BaseWindow):
 
         self.running = True
         self.btn_run.configure(state="disabled", text="実行中...")
+        self.set_status(f"ETC明細をダウンロード中... ({len(targets)} 台)", kind="busy")
         self.log(f"=== 開始: {d_from} 〜 {d_to} / 対象 {len(targets)} 台 ===")
 
         def worker():
@@ -1069,16 +1158,23 @@ class App(_BaseWindow):
                     stamp_opts=stamp_opts,
                     log=self.log,
                 )
+                self._last_error = None
             except Exception as e:
                 self.log(f"エラー: {e}")
+                self._last_error = str(e)
             finally:
                 self.after(0, self.on_done)
 
+        self._last_error = None
         threading.Thread(target=worker, daemon=True).start()
 
     def on_done(self):
         self.running = False
-        self.btn_run.configure(state="normal", text="▶ 実行" if HAS_TTKB else "実行")
+        self.btn_run.configure(state="normal", text="実行")
+        if getattr(self, "_last_error", None):
+            self.set_status(f"処理中にエラーが発生しました: {self._last_error}", kind="error")
+        else:
+            self.set_status("完了しました。保存先フォルダで確認してください", kind="success")
 
 
 if __name__ == "__main__":
