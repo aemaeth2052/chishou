@@ -185,9 +185,9 @@ class App(_BaseWindow):
         def on_ready():
             self._chromium_ready = True
             self.after(0, lambda: self.btn_run.configure(
-                state="normal", text="実行"))
+                state="normal", text="検索開始"))
             self.log("実行できる状態になりました")
-            self.set_status("準備完了。期間と対象を確認したら「実行」を押してください", kind="success")
+            self.set_status("準備完了。期間と対象を確認したら「検索開始」を押してください", kind="success")
             self.after(0, self._first_run_check)
 
         def on_fail():
@@ -299,7 +299,7 @@ class App(_BaseWindow):
         # --- Hks番割の取込 (PDF名と按分レポートに顧客・現場を反映) ---
         hks_row = ttk.Frame(root)
         hks_row.pack(fill="x", pady=(0, 4))
-        self.btn_hks = _btn(hks_row, "Hks番割から取込", self.on_import_hks, style="primary")
+        self.btn_hks = _btn(hks_row, "番割全体表示から取込", self.on_import_hks, style="primary")
         self.btn_hks.pack(side="left")
         ttk.Label(hks_row, textvariable=self.var_hks_status, foreground="#888").pack(side="left", padx=8)
 
@@ -316,7 +316,7 @@ class App(_BaseWindow):
                 runrow, text="ブラウザの動きを表示する",
                 variable=self.var_show,
             ).pack(side="left")
-        self.btn_run = _btn(runrow, "実行", self.on_run, style="success", width=14)
+        self.btn_run = _btn(runrow, "検索開始", self.on_run, style="success", width=14)
         self.btn_run.pack(side="right", padx=4)
         _btn(runrow, "保存先を開く", lambda: open_folder(self.var_dir.get()), style="secondary").pack(side="right", padx=4)
 
@@ -342,7 +342,7 @@ class App(_BaseWindow):
         ttk.Label(box1, text="パスワード").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Entry(box1, textvariable=self.var_pw, width=30, show="*").grid(row=1, column=1, sticky="w", padx=6)
         ttk.Checkbutton(
-            box1, text="パスワードを保存する (config.json に平文保存)",
+            box1, text="パスワードを保存する",
             variable=self.var_save_pw,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
@@ -694,7 +694,7 @@ class App(_BaseWindow):
                 f"({', '.join(dates) or '日付不明'} / 取込{self.hks_imported_at})"
             )
         else:
-            self.var_hks_status.set("未取込 (Hksの番割予定表を開いた状態で押してください)")
+            self.var_hks_status.set("未取込 (業務システムの番割予定表を開いた状態で押してください)")
 
     def on_import_hks(self):
         self.btn_hks.configure(state="disabled", text="取込中...")
@@ -810,7 +810,7 @@ class App(_BaseWindow):
                 self.set_status(f"Hks取込に失敗しました: {e}", kind="error")
             finally:
                 def restore():
-                    self.btn_hks.configure(state="normal", text="Hks番割から取込")
+                    self.btn_hks.configure(state="normal", text="番割全体表示から取込")
                     _set_btn_style(self.btn_hks, "primary")
                     self._update_hks_status()
                 self.after(0, restore)
@@ -1263,7 +1263,7 @@ class App(_BaseWindow):
         }
 
         self.running = True
-        self.btn_run.configure(state="disabled", text="実行中...")
+        self.btn_run.configure(state="disabled", text="検索中...")
         self.set_status(f"ETC明細をダウンロード中... ({len(targets)} 台)", kind="busy")
         self.log(f"=== 開始: {d_from} 〜 {d_to} / 対象 {len(targets)} 台 ===")
 
@@ -1295,7 +1295,7 @@ class App(_BaseWindow):
 
     def on_done(self):
         self.running = False
-        self.btn_run.configure(state="normal", text="実行")
+        self.btn_run.configure(state="normal", text="検索開始")
         if getattr(self, "_last_error", None):
             self.set_status(f"処理中にエラーが発生しました: {self._last_error}", kind="error")
         else:
