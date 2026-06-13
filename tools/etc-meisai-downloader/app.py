@@ -205,6 +205,17 @@ class App(_BaseWindow):
 
     # ============================================================ メインタブ
     def _build_main_tab(self, root):
+        # --- 期間 (最初に決める。日常運用ではここから入力する) ---
+        box2 = ttk.LabelFrame(root, text="検索期間 (過去62日以内)", padding=6)
+        box2.pack(fill="x", pady=(0, 4))
+        ttk.Label(box2, text="開始").grid(row=0, column=0, sticky="w")
+        self._make_date_input(box2, self.var_from).grid(row=0, column=1, padx=4)
+        ttk.Label(box2, text="〜 終了").grid(row=0, column=2, sticky="w")
+        self._make_date_input(box2, self.var_to).grid(row=0, column=3, padx=4)
+        ttk.Button(box2, text="今月", command=self.set_this_month, width=5).grid(row=0, column=4, padx=2)
+        ttk.Button(box2, text="先月", command=self.set_last_month, width=5).grid(row=0, column=5, padx=2)
+        ttk.Button(box2, text="昨日", command=self.set_yesterday, width=5).grid(row=0, column=6, padx=2)
+
         # --- 検索対象 (横並び、幅を抑える) ---
         mode_row = ttk.Frame(root)
         mode_row.pack(fill="x", pady=(0, 4))
@@ -288,17 +299,6 @@ class App(_BaseWindow):
         self.btn_hks = _btn(hks_row, "Hks番割から取込", self.on_import_hks, style="primary")
         self.btn_hks.pack(side="left")
         ttk.Label(hks_row, textvariable=self.var_hks_status, foreground="#888").pack(side="left", padx=8)
-
-        # --- 期間 ---
-        box2 = ttk.LabelFrame(root, text="検索期間 (過去62日以内)", padding=6)
-        box2.pack(fill="x", pady=4)
-        ttk.Label(box2, text="開始").grid(row=0, column=0, sticky="w")
-        self._make_date_input(box2, self.var_from).grid(row=0, column=1, padx=4)
-        ttk.Label(box2, text="〜 終了").grid(row=0, column=2, sticky="w")
-        self._make_date_input(box2, self.var_to).grid(row=0, column=3, padx=4)
-        ttk.Button(box2, text="今月", command=self.set_this_month, width=5).grid(row=0, column=4, padx=2)
-        ttk.Button(box2, text="先月", command=self.set_last_month, width=5).grid(row=0, column=5, padx=2)
-        ttk.Button(box2, text="昨日", command=self.set_yesterday, width=5).grid(row=0, column=6, padx=2)
 
         # --- 実行 ---
         runrow = ttk.Frame(root)
@@ -843,7 +843,7 @@ class App(_BaseWindow):
         ttk.Label(
             frm,
             text=f"番割予定表が {len(metas)} 件見つかりました。取り込むものを選んでください。\n"
-                 "(対象列をクリックでON/OFF)",
+                 "(対象列をクリックでON/OFF / 取り込めるのは同じ日付の番割だけです)",
         ).pack(anchor="w", pady=(0, 10))
 
         tree_frame = ttk.Frame(frm)
@@ -861,7 +861,21 @@ class App(_BaseWindow):
         tree.column("update", width=80, anchor="center", stretch=False)
         tree.pack(fill="both", expand=True)
 
-        checked = [True] * len(metas)
+        # 検索対象が単日なら、その日付の番割だけを初期選択する。
+        # (検索日と違う番割は初期状態でチェックしない)
+        target_iso = None
+        try:
+            d_from = self.parse_date(self.var_from.get(), "")
+            d_to = self.parse_date(self.var_to.get(), "")
+            if d_from == d_to:
+                target_iso = str(d_from)
+        except Exception:
+            target_iso = None
+
+        if target_iso is not None:
+            checked = [m.get("date") == target_iso for m in metas]
+        else:
+            checked = [False] * len(metas)
 
         def render():
             tree.delete(*tree.get_children())
@@ -902,6 +916,16 @@ class App(_BaseWindow):
             idx = [i for i, c in enumerate(checked) if c]
             if not idx:
                 messagebox.showwarning("選択なし", "少なくとも1件選んでください")
+                return
+            # 複数日の番割を同時に取り込むのは誤作動の元なので禁止
+            dates = {metas[i].get("date") for i in idx}
+            if len(dates) > 1:
+                messagebox.showerror(
+                    "複数日は取り込めません",
+                    "異なる日付の番割を同時に取り込むことはできません。\n"
+                    "同じ日付の番割だけを選択してください。\n\n"
+                    f"選択中の日付: {', '.join(sorted(d or '日付不明' for d in dates))}",
+                )
                 return
             result["indices"] = idx
             dlg.destroy()
