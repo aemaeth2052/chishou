@@ -246,6 +246,45 @@ class App(_BaseWindow):
                     self.log(f"Windows用アイコン(.ico)を適用しました: {ico}")
                 except Exception as e:
                     self.log(f"アイコン(.ico)設定失敗: {e}")
+                # Tkのiconbitmapが効かない環境向けに、Win32 APIで直接も適用する。
+                # ウインドウが完全に生成されてから実行する必要があるため after で遅延。
+                self.after(200, lambda i=ico: self._apply_win_icon_native(i))
+
+    def _apply_win_icon_native(self, ico_path):
+        """Win32 の WM_SETICON で直接アイコンを設定する。
+        Tk の iconbitmap が効かない環境(ttkbootstrap・日本語パス・pythonw 等)向けの確実な手段。
+        LoadImageW は Unicode パスを正しく扱うため、日本語フォルダでも問題ない。
+        """
+        try:
+            import ctypes
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x00000010
+            WM_SETICON = 0x0080
+            ICON_SMALL, ICON_BIG = 0, 1
+            u = ctypes.windll.user32
+            p = str(ico_path)
+            big = u.LoadImageW(None, p, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+            small = u.LoadImageW(None, p, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            self._hicons = (big, small)  # ハンドル参照を保持
+            # トップレベルの HWND と、その親(タイトルバー枠)の両方へ送る
+            targets = []
+            hwnd = self.winfo_id()
+            if hwnd:
+                targets.append(hwnd)
+                parent = u.GetParent(hwnd)
+                if parent:
+                    targets.append(parent)
+            for h in targets:
+                if big:
+                    u.SendMessageW(h, WM_SETICON, ICON_BIG, big)
+                if small:
+                    u.SendMessageW(h, WM_SETICON, ICON_SMALL, small)
+            if big or small:
+                self.log("Windowsアイコンを適用しました (WM_SETICON)")
+            else:
+                self.log("WM_SETICON: アイコンの読み込みに失敗しました (.ico の内容を確認してください)")
+        except Exception as e:
+            self.log(f"WM_SETICON 失敗: {e}")
 
     def _ensure_windows_ico(self, png):
         """Windows用 .ico のパスを返す。既存が無ければ PNG から生成する。"""
