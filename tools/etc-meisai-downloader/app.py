@@ -251,38 +251,46 @@ class App(_BaseWindow):
                 self.after(200, lambda i=ico: self._apply_win_icon_native(i))
 
     def _apply_win_icon_native(self, ico_path):
-        """Win32 の WM_SETICON で直接アイコンを設定する。
+        """Win32 の WM_SETICON / クラスアイコンで直接アイコンを設定する。
         Tk の iconbitmap が効かない環境(ttkbootstrap・日本語パス・pythonw 等)向けの確実な手段。
         LoadImageW は Unicode パスを正しく扱うため、日本語フォルダでも問題ない。
         """
         try:
             import ctypes
+            from ctypes import wintypes
             IMAGE_ICON = 1
             LR_LOADFROMFILE = 0x00000010
             WM_SETICON = 0x0080
             ICON_SMALL, ICON_BIG = 0, 1
+            GCLP_HICON, GCLP_HICONSM = -14, -34
+            GA_ROOT = 2
             u = ctypes.windll.user32
+            u.LoadImageW.restype = wintypes.HANDLE
+            u.GetAncestor.restype = wintypes.HWND
             p = str(ico_path)
             big = u.LoadImageW(None, p, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
             small = u.LoadImageW(None, p, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
             self._hicons = (big, small)  # ハンドル参照を保持
-            # トップレベルの HWND と、その親(タイトルバー枠)の両方へ送る
-            targets = []
+            # 正しいトップレベル(タイトルバー枠)HWND を得る
             hwnd = self.winfo_id()
-            if hwnd:
-                targets.append(hwnd)
-                parent = u.GetParent(hwnd)
-                if parent:
-                    targets.append(parent)
-            for h in targets:
+            root = u.GetAncestor(hwnd, GA_ROOT) or hwnd
+            setcls = getattr(u, "SetClassLongPtrW", None) or u.SetClassLongW
+            for h in {hwnd, root}:
+                if not h:
+                    continue
                 if big:
                     u.SendMessageW(h, WM_SETICON, ICON_BIG, big)
                 if small:
                     u.SendMessageW(h, WM_SETICON, ICON_SMALL, small)
-            if big or small:
-                self.log("Windowsアイコンを適用しました (WM_SETICON)")
-            else:
-                self.log("WM_SETICON: アイコンの読み込みに失敗しました (.ico の内容を確認してください)")
+                # タスクバー対策にクラスアイコンも差し替える
+                try:
+                    if big:
+                        setcls(h, GCLP_HICON, big)
+                    if small:
+                        setcls(h, GCLP_HICONSM, small)
+                except Exception:
+                    pass
+            self.log(f"WM_SETICON 適用: hwnd={hwnd} root={root} big={big} small={small}")
         except Exception as e:
             self.log(f"WM_SETICON 失敗: {e}")
 
@@ -299,11 +307,15 @@ class App(_BaseWindow):
         # 無ければ Pillow で PNG → .ico を生成 (ユーザーデータ領域に保存)
         try:
             from PIL import Image
+            resample = getattr(Image, "LANCZOS", None)
+            if resample is None:
+                resample = Image.Resampling.LANCZOS
             ico = user_data_dir() / "icon.ico"
             im = Image.open(png).convert("RGBA")
-            im.save(ico, format="ICO",
-                    sizes=[(16, 16), (24, 24), (32, 32), (48, 48),
-                           (64, 64), (128, 128), (256, 256)])
+            # 各表示サイズを明示的に作って .ico にまとめる (互換性重視)
+            sizes = [256, 128, 64, 48, 32, 24, 16]
+            frames = [im.resize((s, s), resample) for s in sizes]
+            frames[0].save(ico, format="ICO", append_images=frames[1:])
             return ico
         except ImportError:
             self.log("  (Pillow未導入のため .ico を生成できません。setup.bat を再実行してください)")
