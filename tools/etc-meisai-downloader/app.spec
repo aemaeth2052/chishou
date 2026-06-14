@@ -5,9 +5,18 @@
 # Chromium本体は配布物に含めない (サイズ削減)。
 # 初回起動時に browser_setup.py がダウンロードする。
 
+import os
+
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
+
+# アプリアイコン: assets/icon.ico があれば exe に埋め込む。
+# assets/icon.png は実行中ウインドウ用に同梱する (どちらも無ければアイコンなし)。
+_icon_ico = os.path.join("assets", "icon.ico")
+_icon_png = os.path.join("assets", "icon.png")
+app_icon = _icon_ico if os.path.exists(_icon_ico) else None
+icon_datas = [(_icon_png, "assets")] if os.path.exists(_icon_png) else []
 
 hiddenimports = (
     collect_submodules("ttkbootstrap")
@@ -18,6 +27,7 @@ hiddenimports = (
     + collect_submodules("reportlab")
     + collect_submodules("tkcalendar")
     + collect_submodules("babel")
+    + collect_submodules("PIL")
 )
 
 datas = (
@@ -26,6 +36,7 @@ datas = (
     + collect_data_files("reportlab")
     + collect_data_files("tkcalendar")
     + collect_data_files("babel")
+    + icon_datas
 )
 
 a = Analysis(
@@ -55,7 +66,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,    # コンソール窓を出さない
-    icon=None,
+    icon=app_icon,
 )
 coll = COLLECT(
     exe,

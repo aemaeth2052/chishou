@@ -22,6 +22,27 @@ def run(cmd, **kw):
         sys.exit(1)
 
 
+def make_icon(py):
+    """assets/icon.png から Windows用 icon.ico を生成する。
+    PNG が無ければアイコンなしでビルドを続行する。
+    """
+    png = BASE_DIR / "assets" / "icon.png"
+    ico = BASE_DIR / "assets" / "icon.ico"
+    if not png.exists():
+        print("  assets/icon.png が無いため、アイコンなしでビルドします")
+        return
+    try:
+        from PIL import Image
+    except ImportError:
+        run([py, "-m", "pip", "install", "pillow"], stdout=subprocess.DEVNULL)
+        from PIL import Image
+    img = Image.open(png).convert("RGBA")
+    # Windowsの各表示サイズ分をまとめた .ico を書き出す
+    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    img.save(ico, format="ICO", sizes=sizes)
+    print(f"  アイコンを生成しました: {ico.name}")
+
+
 def main():
     py = sys.executable
 
@@ -30,6 +51,7 @@ def main():
         stdout=subprocess.DEVNULL)
     run([py, "-m", "pip", "install", "-r", str(BASE_DIR / "requirements.txt")],
         stdout=subprocess.DEVNULL)
+    make_icon(py)
 
     print("[2/4] 前回のビルドを削除しています...")
     for d in (BASE_DIR / "build", BASE_DIR / "dist"):

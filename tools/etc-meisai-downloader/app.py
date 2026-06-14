@@ -43,6 +43,24 @@ BASE_DIR = Path(__file__).resolve().parent
 migrate_old_data(BASE_DIR)
 CONFIG_PATH = config_path()
 
+# Windows: タスクバーが pythonw.exe ではなく本アプリのアイコンでグルーピングするよう、
+# ウインドウ生成前に独自の AppUserModelID を設定する (これが無いとアイコンが反映されない)。
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "etc.meisai.downloader")
+    except Exception:
+        pass
+
+
+def resource_path(rel: str) -> Path:
+    """同梱リソース(アイコン等)の絶対パスを返す。
+    PyInstaller の onedir 配布では sys._MEIPASS 配下に展開される。
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    return (Path(base) if base else BASE_DIR) / rel
+
 
 def load_config():
     if CONFIG_PATH.exists():
@@ -107,6 +125,7 @@ class App(_BaseWindow):
         self.log_queue = queue.Queue()
         self.running = False
         self._hks_importing = False
+        self._set_app_icon()
 
         cfg = load_config()
         today = datetime.date.today()
@@ -175,6 +194,159 @@ class App(_BaseWindow):
         self.after(100, self.poll_log)
         self._chromium_ready = False
         self._ensure_browser()
+
+    def _set_app_icon(self):
+        """ウインドウ/タスクバーのアイコンを設定する。
+        assets/icon.png があれば全プラットフォームで iconphoto に使う。
+        Windows では assets/icon.ico があればタイトルバー用に併用する。
+        画像が無ければ何もしない (既定アイコンのまま)。
+        失敗理由はログに残す (原因切り分け用)。
+        """
+        # 探索パス: ソース実行・PyInstaller(_MEIPASS)・exe隣 のいずれでも拾えるように
+        png_candidates = [
+            resource_path("assets/icon.png"),
+            BASE_DIR / "assets" / "icon.png",
+            Path(sys.executable).resolve().parent / "assets" / "icon.png",
+        ]
+        png = next((p for p in png_candidates if p.exists()), None)
+        if png is None:
+            self.log("アイコン: assets/icon.png が見つかりませんでした")
+        else:
+            # 元画像(1024px等)が大きすぎるとタイトルバー(16px)・タスクバー(32px)に
+            # 描画されないため、用途別の小サイズを作って iconphoto に全部渡す。
+            imgs = []
+            try:
+                from PIL import Image, ImageTk
+                resample = getattr(Image, "LANCZOS", None) or Image.Resampling.LANCZOS
+                im = Image.open(png).convert("RGBA")
+                for s in (256, 64, 48, 32, 16):
+                    imgs.append(ImageTk.PhotoImage(im.resize((s, s), resample)))
+            except ImportError:
+                self.log("  (Pillow未導入。setup.bat を再実行してください)")
+            except Exception as e:
+                self.log(f"アイコン画像の生成に失敗: {e}")
+            if not imgs:
+                # フォールバック: Tk標準で1枚だけ
+                try:
+                    imgs = [tk.PhotoImage(file=str(png))]
+                except Exception as e:
+                    self.log(f"アイコン読み込み失敗(Tk標準): {e}")
+            if imgs:
+                self._icon_imgs = imgs  # GC防止に参照保持
+                try:
+                    self.iconphoto(True, *imgs)
+                except Exception as e:
+                    self.log(f"iconphoto 失敗: {e}")
+            else:
+                self.log("アイコンを設定できませんでした。PNG形式・サイズを確認してください")
+        # Windows ではタイトルバー/タスクバーに確実に出すため .ico を iconbitmap で適用する。
+        # (iconphoto の PNG は Windows のタイトルバー・タスクバーに反映されないことが多い)
+        if sys.platform == "win32" and png is not None:
+            ico = self._ensure_windows_ico(png)
+            if ico:
+                try:
+                    self.iconbitmap(default=str(ico))
+                except Exception as e:
+                    self.log(f"アイコン(.ico)設定失敗: {e}")
+                # Tkのiconbitmapが効かない環境向けに、Win32 APIで直接も適用する。
+                # ウインドウ生成・表示のタイミング差に備え、複数回リトライする。
+                for _delay in (150, 600, 1500, 3000):
+                    self.after(_delay, lambda i=ico: self._apply_win_icon_native(i))
+
+    def _apply_win_icon_native(self, ico_path):
+        """Win32 の WM_SETICON / クラスアイコンで直接アイコンを設定する。
+
+        Tk の iconphoto/iconbitmap は、ttkbootstrap 環境では winfo_id() が
+        タイトルバーを持つ実窓と別の内部窓を指すため効かないことがある。
+        そこで本GUIスレッドの全ウインドウを列挙し、タイトルを持つ実窓へ直接適用する。
+        実窓は生成が少し遅れ、かつ Tk が直後に自前アイコンで上書きすることがあるため、
+        複数回のリトライで当て続ける (ログは初回成功時の1回だけ)。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x00000010
+            WM_SETICON = 0x0080
+            ICON_SMALL, ICON_BIG = 0, 1
+            GCLP_HICON, GCLP_HICONSM = -14, -34
+            u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            # 64bitでハンドル/ポインタが切り詰められないよう型を明示する
+            u.LoadImageW.restype = wintypes.HANDLE
+            u.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR,
+                                     wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                     wintypes.UINT]
+            u.SendMessageW.restype = ctypes.c_void_p
+            u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                       ctypes.c_void_p, ctypes.c_void_p]
+            setcls = getattr(u, "SetClassLongPtrW", None) or u.SetClassLongW
+            p = str(ico_path)
+            big = u.LoadImageW(None, p, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+            small = u.LoadImageW(None, p, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            self._hicons = (big, small)  # ハンドル参照を保持
+
+            def apply_to(h):
+                if not h:
+                    return
+                if big:
+                    u.SendMessageW(h, WM_SETICON, ICON_BIG, big)
+                if small:
+                    u.SendMessageW(h, WM_SETICON, ICON_SMALL, small)
+                try:
+                    if big:
+                        setcls(h, GCLP_HICON, big)
+                    if small:
+                        setcls(h, GCLP_HICONSM, small)
+                except Exception:
+                    pass
+
+            apply_to(self.winfo_id())
+            # 本GUIスレッドの全ウインドウを列挙し、タイトルを持つ実窓へ適用する。
+            tid = k.GetCurrentThreadId()
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
+                                             wintypes.LPARAM)
+
+            def _cb(h, _lp):
+                try:
+                    if u.GetWindowTextLengthW(h) > 0 or u.IsWindowVisible(h):
+                        apply_to(h)
+                except Exception:
+                    pass
+                return True
+
+            u.EnumThreadWindows(tid, WNDENUMPROC(_cb), 0)
+        except Exception:
+            pass
+
+    def _ensure_windows_ico(self, png):
+        """Windows用 .ico のパスを返す。既存が無ければ PNG から生成する。"""
+        for c in (resource_path("assets/icon.ico"),
+                  BASE_DIR / "assets" / "icon.ico",
+                  Path(sys.executable).resolve().parent / "assets" / "icon.ico"):
+            try:
+                if c.exists():
+                    return c
+            except Exception:
+                pass
+        # 無ければ Pillow で PNG → .ico を生成 (ユーザーデータ領域に保存)
+        try:
+            from PIL import Image
+            resample = getattr(Image, "LANCZOS", None)
+            if resample is None:
+                resample = Image.Resampling.LANCZOS
+            ico = user_data_dir() / "icon.ico"
+            im = Image.open(png).convert("RGBA")
+            # 各表示サイズを明示的に作って .ico にまとめる (互換性重視)
+            sizes = [256, 128, 64, 48, 32, 24, 16]
+            frames = [im.resize((s, s), resample) for s in sizes]
+            frames[0].save(ico, format="ICO", append_images=frames[1:])
+            return ico
+        except ImportError:
+            self.log("  (Pillow未導入のため .ico を生成できません。setup.bat を再実行してください)")
+        except Exception as e:
+            self.log(f"アイコン(.ico)生成失敗: {e}")
+        return None
 
     # ============================================================ ブラウザ準備
     def _ensure_browser(self):
@@ -713,7 +885,7 @@ class App(_BaseWindow):
         # 取込中は検索開始を押せないようにする
         self._hks_importing = True
         self.btn_run.configure(state="disabled")
-        self.set_status("Hks番割を読み取っています...", kind="busy")
+        self.set_status("番割予定表を読み取っています...", kind="busy")
 
         def worker():
             try:
@@ -728,7 +900,7 @@ class App(_BaseWindow):
                     chosen = self._ask_window_selection_sync(metas)
                     if chosen is None:
                         self.log("Hks取込をキャンセルしました")
-                        self.set_status("Hks番割の取込をキャンセルしました", kind="info")
+                        self.set_status("番割予定表の取込をキャンセルしました", kind="info")
                         return
                     metas = [metas[i] for i in chosen]
                 self.log(f"{len(metas)} 画面を取り込みます")
@@ -806,7 +978,7 @@ class App(_BaseWindow):
                 self.log(f"登録済み車両への反映: {matched} 台に顧客・現場・運転手をセットしました")
                 if shared_driver_cleared:
                     self.log(f"  うち {shared_driver_cleared} 台は同一現場に複数車両のため運転手を空欄にしました")
-                self.set_status(f"Hks番割の取込が完了しました ({matched} 台に反映)", kind="success")
+                self.set_status(f"番割予定表の取込が完了しました ({matched} 台に反映)", kind="success")
                 if unmatched:
                     self.log(f"※番割にあるが未登録の車両: {', '.join(sorted(unmatched, key=lambda x: x.zfill(4)))}")
                 if multi_list:
@@ -821,7 +993,7 @@ class App(_BaseWindow):
                 self.set_status("ライブラリが不足しています。setup.bat を再実行してください", kind="error")
             except Exception as e:
                 self.log(f"Hks取込エラー: {e}")
-                self.set_status(f"Hks取込に失敗しました: {e}", kind="error")
+                self.set_status(f"番割予定表の取込に失敗しました: {e}", kind="error")
             finally:
                 def restore():
                     self.btn_hks.configure(state="normal", text="番割全体表示から取込")
@@ -879,6 +1051,8 @@ class App(_BaseWindow):
         tree.column("office", width=200, anchor="w", stretch=False)
         tree.column("date", width=110, anchor="center", stretch=False)
         tree.column("update", width=80, anchor="center", stretch=False)
+        # チェック済みの行をうっすら水色でハイライトする
+        tree.tag_configure("checked", background="#e6f3fb")
         tree.pack(fill="both", expand=True)
 
         # 検索対象が単日なら、その日付の番割だけを初期選択する。
@@ -900,7 +1074,7 @@ class App(_BaseWindow):
         def render():
             tree.delete(*tree.get_children())
             for i, m in enumerate(metas):
-                tree.insert("", "end", iid=str(i), values=(
+                tree.insert("", "end", iid=str(i), tags=("checked",) if checked[i] else (), values=(
                     "☑" if checked[i] else "☐",
                     m.get("office") or "営業所不明",
                     m.get("date") or "日付不明",
@@ -1023,11 +1197,11 @@ class App(_BaseWindow):
         return kept
 
     def _stamp_size(self):
-        """文字サイズ設定を安全に読む (空欄・異常値は既定27、6〜72に丸め)"""
+        """文字サイズ設定を安全に読む (空欄・異常値は既定14、6〜72に丸め)"""
         try:
             v = int(self.var_stamp_size.get())
         except Exception:
-            v = 27
+            v = 14
         return max(6, min(v, 72))
 
     def _save_now(self):
@@ -1050,8 +1224,8 @@ class App(_BaseWindow):
             "stamp_site": self.var_stamp_site.get(),
             "stamp_driver": self.var_stamp_driver.get(),
             "stamp_font_size": self._stamp_size(),
-            "hks_records": self.hks_records,
-            "hks_imported_at": self.hks_imported_at,
+            # 番割(hks_records / hks_imported_at)は日替わりで起動時に必ず未取込から
+            # 始める設計のため、config.json には保存しない (書いても読み戻さないため無駄)。
             "single": {
                 "dept": self.var_single_dept.get().strip(),
                 "number": self.var_single_num.get().strip(),
@@ -1280,9 +1454,13 @@ class App(_BaseWindow):
         }
 
         self.running = True
-        self.btn_run.configure(state="disabled", text="検索中...")
+        self.btn_run.configure(state="disabled", text=f"検索中 0/{len(targets)}")
         self.set_status(f"ETC明細をダウンロード中... ({len(targets)} 台)", kind="busy")
         self.log(f"=== 開始: {d_from} 〜 {d_to} / 対象 {len(targets)} 台 ===")
+
+        def on_progress(done, total):
+            # ワーカースレッドから呼ばれるので UI 更新は after で本スレッドに戻す
+            self.after(0, lambda: self.btn_run.configure(text=f"検索中 {done}/{total}"))
 
         def worker():
             try:
@@ -1299,6 +1477,7 @@ class App(_BaseWindow):
                     name_in_filename=name_in_filename,
                     stamp_opts=stamp_opts,
                     log=self.log,
+                    progress=on_progress,
                 )
                 self._last_error = None
             except Exception as e:

@@ -28,7 +28,7 @@ FLAG_CHARS = set("￥地書他注")
 NON_CUSTOMER = {"待機", "休み/留守", "休み", "留守"}
 
 # 先頭の装飾記号 (●★☆◎ など) と、顧客名先頭の [若松] [下建] [元 商] 等の角カッコ
-_LEAD_MARK_RE = re.compile(r"^[●★☆◎▲△◆◇■□]+\s*")
+_LEAD_MARK_RE = re.compile(r"^[●★☆◎▲△◆◇■□○〇◯]+\s*")
 _LEAD_BRACKET_RE = re.compile(r"^[\[【［][^\]】］]*[\]】］]\s*")
 
 # 株式会社/有限会社 と社名の間は半角スペース1つに統一
@@ -50,6 +50,24 @@ def _normalize_company_spacing(s: str) -> str:
 def _strip_lead_marks(text: str) -> str:
     """先頭の装飾(●など)を除去"""
     return _LEAD_MARK_RE.sub("", text).strip()
+
+
+# 個人名の前に付くラベル「通)」「（通）」「(送)」等。
+# 半角/全角の閉じカッコまでを名前と無関係の前置きとみなす。
+_WORKER_LABEL_RE = re.compile(r"^[(（]?[^()（）]*[)）]\s*")
+
+
+def _clean_worker_name(text: str) -> str:
+    """作業員名: 名前の前に付くラベル(「通)」「（通）」等)と装飾記号(●★ 等)を
+    取り除いて個人名だけにする。例: 「通)●田中」→「田中」"""
+    s = text.strip()
+    while True:
+        prev = s
+        s = _WORKER_LABEL_RE.sub("", s).strip()
+        s = _LEAD_MARK_RE.sub("", s).strip()
+        if s == prev:
+            break
+    return s
 
 
 def _clean_customer(text: str) -> str:
@@ -206,11 +224,11 @@ def _parse_block(block, customer):
         if not vehicle_raw and is_vehicle(joined):
             vehicle_raw = joined
 
-    # 作業員 (右側Customの名前。●★や所属プレフィックスを除去)
+    # 作業員 (右側Customの名前。「通)」等のラベルや ●★ 装飾を除去して個人名だけにする)
     workers = []
     for it in right_items:
         if it["texts"]:
-            name = it["texts"][-1].lstrip("●★☆◎").strip()
+            name = _clean_worker_name(it["texts"][-1])
             if name:
                 workers.append(name)
 
