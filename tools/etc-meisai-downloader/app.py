@@ -221,7 +221,6 @@ class App(_BaseWindow):
                 im = Image.open(png).convert("RGBA")
                 for s in (256, 64, 48, 32, 16):
                     imgs.append(ImageTk.PhotoImage(im.resize((s, s), resample)))
-                self.log(f"アイコン画像を生成しました ({len(imgs)}サイズ): {png}")
             except ImportError:
                 self.log("  (Pillow未導入。setup.bat を再実行してください)")
             except Exception as e:
@@ -236,7 +235,6 @@ class App(_BaseWindow):
                 self._icon_imgs = imgs  # GC防止に参照保持
                 try:
                     self.iconphoto(True, *imgs)
-                    self.log("アイコンを設定しました (iconphoto 複数サイズ)")
                 except Exception as e:
                     self.log(f"iconphoto 失敗: {e}")
             else:
@@ -248,7 +246,6 @@ class App(_BaseWindow):
             if ico:
                 try:
                     self.iconbitmap(default=str(ico))
-                    self.log(f"Windows用アイコン(.ico)を適用しました: {ico}")
                 except Exception as e:
                     self.log(f"アイコン(.ico)設定失敗: {e}")
                 # Tkのiconbitmapが効かない環境向けに、Win32 APIで直接も適用する。
@@ -307,27 +304,20 @@ class App(_BaseWindow):
             apply_to(self.winfo_id())
             # 本GUIスレッドの全ウインドウを列挙し、タイトルを持つ実窓へ適用する。
             tid = k.GetCurrentThreadId()
-            state = {"done": False}
             WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
                                              wintypes.LPARAM)
 
             def _cb(h, _lp):
                 try:
-                    n = u.GetWindowTextLengthW(h)
-                    if n > 0 or u.IsWindowVisible(h):
+                    if u.GetWindowTextLengthW(h) > 0 or u.IsWindowVisible(h):
                         apply_to(h)
-                    if n > 0:   # タイトルを持つ = タイトルバーのある実窓
-                        state["done"] = True
                 except Exception:
                     pass
                 return True
 
             u.EnumThreadWindows(tid, WNDENUMPROC(_cb), 0)
-            if state["done"] and not getattr(self, "_icon_logged", False):
-                self._icon_logged = True
-                self.log("Windowsアイコンを適用しました")
-        except Exception as e:
-            self.log(f"Windowsアイコン適用に失敗: {e}")
+        except Exception:
+            pass
 
     def _ensure_windows_ico(self, png):
         """Windows用 .ico のパスを返す。既存が無ければ PNG から生成する。"""
