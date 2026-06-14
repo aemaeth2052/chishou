@@ -268,37 +268,31 @@ class App(_BaseWindow):
             WM_SETICON = 0x0080
             ICON_SMALL, ICON_BIG = 0, 1
             GCLP_HICON, GCLP_HICONSM = -14, -34
-            GA_ROOT = 2
             u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            # 64bitでハンドル/ポインタが切り詰められないよう型を明示する
             u.LoadImageW.restype = wintypes.HANDLE
-            u.GetAncestor.restype = wintypes.HWND
+            u.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR,
+                                     wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                     wintypes.UINT]
+            u.SendMessageW.restype = ctypes.c_void_p
+            u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                       ctypes.c_void_p, ctypes.c_void_p]
+            u.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                   ctypes.POINTER(wintypes.DWORD)]
+            setcls = getattr(u, "SetClassLongPtrW", None) or u.SetClassLongW
             p = str(ico_path)
             big = u.LoadImageW(None, p, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
             small = u.LoadImageW(None, p, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
             self._hicons = (big, small)  # ハンドル参照を保持
-            # タイトルバーを描く窓を狙う。Tkでは winfo_id ではなく
-            # 「wm frame」(装飾フレーム)の HWND がタイトルバー窓のことが多い。
-            hwnd = self.winfo_id()
-            targets = {hwnd}
-            frame_id = None
-            try:
-                frame_id = int(self.wm_frame(), 16)
-                if frame_id:
-                    targets.add(frame_id)
-            except Exception:
-                pass
-            root = u.GetAncestor(hwnd, GA_ROOT)
-            if root:
-                targets.add(root)
-            setcls = getattr(u, "SetClassLongPtrW", None) or u.SetClassLongW
-            for h in targets:
+
+            def apply_to(h):
                 if not h:
-                    continue
+                    return
                 if big:
                     u.SendMessageW(h, WM_SETICON, ICON_BIG, big)
                 if small:
                     u.SendMessageW(h, WM_SETICON, ICON_SMALL, small)
-                # タスクバー対策にクラスアイコンも差し替える
                 try:
                     if big:
                         setcls(h, GCLP_HICON, big)
@@ -306,8 +300,30 @@ class App(_BaseWindow):
                         setcls(h, GCLP_HICONSM, small)
                 except Exception:
                     pass
-            self.log(f"WM_SETICON 適用: hwnd={hwnd} frame={frame_id} "
-                     f"root={root} big={big} small={small}")
+
+            hwnd = self.winfo_id()
+            apply_to(hwnd)
+            # Tkの返すHWNDと実際の表示窓が違う場合に備え、本プロセスの可視
+            # トップレベル窓をWindows側から列挙して、その実HWNDにも直接適用する。
+            pid = k.GetCurrentProcessId()
+            found = []
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
+                                             wintypes.LPARAM)
+
+            def _cb(h, _lp):
+                dw = wintypes.DWORD()
+                u.GetWindowThreadProcessId(h, ctypes.byref(dw))
+                if dw.value == pid and u.IsWindowVisible(h):
+                    n = u.GetWindowTextLengthW(h)
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    u.GetWindowTextW(h, buf, n + 1)
+                    found.append((h, buf.value))
+                    apply_to(h)
+                return True
+
+            u.EnumWindows(WNDENUMPROC(_cb), 0)
+            self.log(f"WM_SETICON: winfo_id={hwnd} big={big} small={small} "
+                     f"可視窓={found}")
         except Exception as e:
             self.log(f"WM_SETICON 失敗: {e}")
 
