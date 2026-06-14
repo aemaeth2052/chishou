@@ -271,11 +271,22 @@ class App(_BaseWindow):
             big = u.LoadImageW(None, p, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
             small = u.LoadImageW(None, p, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
             self._hicons = (big, small)  # ハンドル参照を保持
-            # 正しいトップレベル(タイトルバー枠)HWND を得る
+            # タイトルバーを描く窓を狙う。Tkでは winfo_id ではなく
+            # 「wm frame」(装飾フレーム)の HWND がタイトルバー窓のことが多い。
             hwnd = self.winfo_id()
-            root = u.GetAncestor(hwnd, GA_ROOT) or hwnd
+            targets = {hwnd}
+            frame_id = None
+            try:
+                frame_id = int(self.wm_frame(), 16)
+                if frame_id:
+                    targets.add(frame_id)
+            except Exception:
+                pass
+            root = u.GetAncestor(hwnd, GA_ROOT)
+            if root:
+                targets.add(root)
             setcls = getattr(u, "SetClassLongPtrW", None) or u.SetClassLongW
-            for h in {hwnd, root}:
+            for h in targets:
                 if not h:
                     continue
                 if big:
@@ -290,7 +301,8 @@ class App(_BaseWindow):
                         setcls(h, GCLP_HICONSM, small)
                 except Exception:
                     pass
-            self.log(f"WM_SETICON 適用: hwnd={hwnd} root={root} big={big} small={small}")
+            self.log(f"WM_SETICON 適用: hwnd={hwnd} frame={frame_id} "
+                     f"root={root} big={big} small={small}")
         except Exception as e:
             self.log(f"WM_SETICON 失敗: {e}")
 
