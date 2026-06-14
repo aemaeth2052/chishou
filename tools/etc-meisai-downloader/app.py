@@ -212,29 +212,34 @@ class App(_BaseWindow):
         if png is None:
             self.log("アイコン: assets/icon.png が見つかりませんでした")
         else:
-            ok = False
-            # 1) Tk標準のPhotoImage (PNG対応は Tk 8.6 以降)
+            # 元画像(1024px等)が大きすぎるとタイトルバー(16px)・タスクバー(32px)に
+            # 描画されないため、用途別の小サイズを作って iconphoto に全部渡す。
+            imgs = []
             try:
-                self._icon_img = tk.PhotoImage(file=str(png))
-                self.iconphoto(True, self._icon_img)
-                ok = True
-                self.log(f"アイコンを設定しました: {png}")
+                from PIL import Image, ImageTk
+                resample = getattr(Image, "LANCZOS", None) or Image.Resampling.LANCZOS
+                im = Image.open(png).convert("RGBA")
+                for s in (256, 64, 48, 32, 16):
+                    imgs.append(ImageTk.PhotoImage(im.resize((s, s), resample)))
+                self.log(f"アイコン画像を生成しました ({len(imgs)}サイズ): {png}")
+            except ImportError:
+                self.log("  (Pillow未導入。setup.bat を再実行してください)")
             except Exception as e:
-                self.log(f"アイコン読み込み失敗(Tk標準): {e}")
-                # 2) Pillow があれば変換して再試行 (JPEG実体・特殊PNG・巨大サイズ対策)
+                self.log(f"アイコン画像の生成に失敗: {e}")
+            if not imgs:
+                # フォールバック: Tk標準で1枚だけ
                 try:
-                    from PIL import Image, ImageTk
-                    im = Image.open(png).convert("RGBA")
-                    im.thumbnail((256, 256))
-                    self._icon_img = ImageTk.PhotoImage(im)
-                    self.iconphoto(True, self._icon_img)
-                    ok = True
-                    self.log("アイコンを設定しました (Pillow経由)")
-                except ImportError:
-                    self.log("  (Pillow未導入のため変換フォールバックは省略)")
-                except Exception as e2:
-                    self.log(f"アイコン読み込み失敗(Pillow): {e2}")
-            if not ok:
+                    imgs = [tk.PhotoImage(file=str(png))]
+                except Exception as e:
+                    self.log(f"アイコン読み込み失敗(Tk標準): {e}")
+            if imgs:
+                self._icon_imgs = imgs  # GC防止に参照保持
+                try:
+                    self.iconphoto(True, *imgs)
+                    self.log("アイコンを設定しました (iconphoto 複数サイズ)")
+                except Exception as e:
+                    self.log(f"iconphoto 失敗: {e}")
+            else:
                 self.log("アイコンを設定できませんでした。PNG形式・サイズを確認してください")
         # Windows ではタイトルバー/タスクバーに確実に出すため .ico を iconbitmap で適用する。
         # (iconphoto の PNG は Windows のタイトルバー・タスクバーに反映されないことが多い)
