@@ -258,9 +258,15 @@ class App(_BaseWindow):
 
     def _apply_win_icon_native(self, ico_path):
         """Win32 の WM_SETICON / クラスアイコンで直接アイコンを設定する。
-        Tk の iconbitmap が効かない環境(ttkbootstrap・日本語パス・pythonw 等)向けの確実な手段。
-        LoadImageW は Unicode パスを正しく扱うため、日本語フォルダでも問題ない。
+
+        Tk の iconphoto/iconbitmap は、ttkbootstrap 環境では winfo_id() が
+        タイトルバーを持つ実窓と別の内部窓を指すため効かないことがある。
+        そこで本GUIスレッドの全ウインドウを列挙し、タイトルを持つ実窓へ直接適用する。
+        実窓は生成が少し遅れるため、適用できるまで複数回リトライする
+        (成功したら _icon_applied を立てて以降はスキップ)。
         """
+        if getattr(self, "_icon_applied", False):
+            return
         try:
             import ctypes
             from ctypes import wintypes
@@ -279,8 +285,6 @@ class App(_BaseWindow):
             u.SendMessageW.restype = ctypes.c_void_p
             u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
                                        ctypes.c_void_p, ctypes.c_void_p]
-            u.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
-                                                   ctypes.POINTER(wintypes.DWORD)]
             setcls = getattr(u, "SetClassLongPtrW", None) or u.SetClassLongW
             p = str(ico_path)
             big = u.LoadImageW(None, p, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
@@ -302,32 +306,30 @@ class App(_BaseWindow):
                 except Exception:
                     pass
 
-            hwnd = self.winfo_id()
-            apply_to(hwnd)
-            # Tkの返すHWNDと実際の表示窓が違う場合に備え、本GUIスレッドが作った
-            # 全ウインドウを列挙して、その実HWNDにも直接適用する (可視判定に依存しない)。
+            apply_to(self.winfo_id())
+            # 本GUIスレッドの全ウインドウを列挙し、タイトルを持つ実窓へ適用する。
             tid = k.GetCurrentThreadId()
-            found = []
+            state = {"done": False}
             WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
                                              wintypes.LPARAM)
 
             def _cb(h, _lp):
                 try:
                     n = u.GetWindowTextLengthW(h)
-                    buf = ctypes.create_unicode_buffer(n + 1)
-                    u.GetWindowTextW(h, buf, n + 1)
-                    vis = bool(u.IsWindowVisible(h))
-                    found.append((h, buf.value, vis))
-                    apply_to(h)
+                    if n > 0 or u.IsWindowVisible(h):
+                        apply_to(h)
+                    if n > 0:   # タイトルを持つ = タイトルバーのある実窓
+                        state["done"] = True
                 except Exception:
                     pass
                 return True
 
             u.EnumThreadWindows(tid, WNDENUMPROC(_cb), 0)
-            self.log(f"WM_SETICON: winfo_id={hwnd} big={big} small={small} "
-                     f"スレッド窓={found}")
+            if state["done"]:
+                self._icon_applied = True
+                self.log("Windowsアイコンを適用しました")
         except Exception as e:
-            self.log(f"WM_SETICON 失敗: {e}")
+            self.log(f"Windowsアイコン適用に失敗: {e}")
 
     def _ensure_windows_ico(self, png):
         """Windows用 .ico のパスを返す。既存が無ければ PNG から生成する。"""
