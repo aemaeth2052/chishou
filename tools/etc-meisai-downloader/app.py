@@ -252,8 +252,9 @@ class App(_BaseWindow):
                 except Exception as e:
                     self.log(f"アイコン(.ico)設定失敗: {e}")
                 # Tkのiconbitmapが効かない環境向けに、Win32 APIで直接も適用する。
-                # ウインドウが完全に生成されてから実行する必要があるため after で遅延。
-                self.after(200, lambda i=ico: self._apply_win_icon_native(i))
+                # ウインドウ生成・表示のタイミング差に備え、複数回リトライする。
+                for _delay in (150, 600, 1500, 3000):
+                    self.after(_delay, lambda i=ico: self._apply_win_icon_native(i))
 
     def _apply_win_icon_native(self, ico_path):
         """Win32 の WM_SETICON / クラスアイコンで直接アイコンを設定する。
@@ -303,27 +304,28 @@ class App(_BaseWindow):
 
             hwnd = self.winfo_id()
             apply_to(hwnd)
-            # Tkの返すHWNDと実際の表示窓が違う場合に備え、本プロセスの可視
-            # トップレベル窓をWindows側から列挙して、その実HWNDにも直接適用する。
-            pid = k.GetCurrentProcessId()
+            # Tkの返すHWNDと実際の表示窓が違う場合に備え、本GUIスレッドが作った
+            # 全ウインドウを列挙して、その実HWNDにも直接適用する (可視判定に依存しない)。
+            tid = k.GetCurrentThreadId()
             found = []
             WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
                                              wintypes.LPARAM)
 
             def _cb(h, _lp):
-                dw = wintypes.DWORD()
-                u.GetWindowThreadProcessId(h, ctypes.byref(dw))
-                if dw.value == pid and u.IsWindowVisible(h):
+                try:
                     n = u.GetWindowTextLengthW(h)
                     buf = ctypes.create_unicode_buffer(n + 1)
                     u.GetWindowTextW(h, buf, n + 1)
-                    found.append((h, buf.value))
+                    vis = bool(u.IsWindowVisible(h))
+                    found.append((h, buf.value, vis))
                     apply_to(h)
+                except Exception:
+                    pass
                 return True
 
-            u.EnumWindows(WNDENUMPROC(_cb), 0)
+            u.EnumThreadWindows(tid, WNDENUMPROC(_cb), 0)
             self.log(f"WM_SETICON: winfo_id={hwnd} big={big} small={small} "
-                     f"可視窓={found}")
+                     f"スレッド窓={found}")
         except Exception as e:
             self.log(f"WM_SETICON 失敗: {e}")
 
