@@ -175,6 +175,9 @@ class App(_BaseWindow):
         # (前回の取込結果は引き継がない)
         self.hks_records = []
         self.hks_imported_at = ""
+        # 更新なしの番割を読み直さないための取込キャッシュ。
+        # {(営業所, 日付, 更新HH:MM): [records]}。日替わりのため永続化はしない。
+        self._hks_cache = {}
         self.var_hks_status = tk.StringVar()
         self._update_hks_status()
 
@@ -904,7 +907,7 @@ class App(_BaseWindow):
                         return
                     metas = [metas[i] for i in chosen]
                 self.log(f"{len(metas)} 画面を取り込みます")
-                records = hks_reader.read_windows(metas, log=self.log)
+                records = hks_reader.read_windows(metas, log=self.log, cache=self._hks_cache)
                 records = self._dedup_hks_windows(records)
                 self.hks_records = records
                 self.hks_imported_at = datetime.datetime.now().strftime("%m/%d %H:%M")
