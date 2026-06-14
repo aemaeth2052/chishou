@@ -43,6 +43,16 @@ BASE_DIR = Path(__file__).resolve().parent
 migrate_old_data(BASE_DIR)
 CONFIG_PATH = config_path()
 
+# Windows: タスクバーが pythonw.exe ではなく本アプリのアイコンでグルーピングするよう、
+# ウインドウ生成前に独自の AppUserModelID を設定する (これが無いとアイコンが反映されない)。
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "etc.meisai.downloader")
+    except Exception:
+        pass
+
 
 def resource_path(rel: str) -> Path:
     """同梱リソース(アイコン等)の絶対パスを返す。
@@ -226,18 +236,41 @@ class App(_BaseWindow):
                     self.log(f"アイコン読み込み失敗(Pillow): {e2}")
             if not ok:
                 self.log("アイコンを設定できませんでした。PNG形式・サイズを確認してください")
-        if sys.platform == "win32":
-            try:
-                ico_candidates = [
-                    resource_path("assets/icon.ico"),
-                    BASE_DIR / "assets" / "icon.ico",
-                    Path(sys.executable).resolve().parent / "assets" / "icon.ico",
-                ]
-                ico = next((p for p in ico_candidates if p.exists()), None)
-                if ico:
+        # Windows ではタイトルバー/タスクバーに確実に出すため .ico を iconbitmap で適用する。
+        # (iconphoto の PNG は Windows のタイトルバー・タスクバーに反映されないことが多い)
+        if sys.platform == "win32" and png is not None:
+            ico = self._ensure_windows_ico(png)
+            if ico:
+                try:
                     self.iconbitmap(default=str(ico))
-            except Exception as e:
-                self.log(f"アイコン(.ico)設定失敗: {e}")
+                    self.log(f"Windows用アイコン(.ico)を適用しました: {ico}")
+                except Exception as e:
+                    self.log(f"アイコン(.ico)設定失敗: {e}")
+
+    def _ensure_windows_ico(self, png):
+        """Windows用 .ico のパスを返す。既存が無ければ PNG から生成する。"""
+        for c in (resource_path("assets/icon.ico"),
+                  BASE_DIR / "assets" / "icon.ico",
+                  Path(sys.executable).resolve().parent / "assets" / "icon.ico"):
+            try:
+                if c.exists():
+                    return c
+            except Exception:
+                pass
+        # 無ければ Pillow で PNG → .ico を生成 (ユーザーデータ領域に保存)
+        try:
+            from PIL import Image
+            ico = user_data_dir() / "icon.ico"
+            im = Image.open(png).convert("RGBA")
+            im.save(ico, format="ICO",
+                    sizes=[(16, 16), (24, 24), (32, 32), (48, 48),
+                           (64, 64), (128, 128), (256, 256)])
+            return ico
+        except ImportError:
+            self.log("  (Pillow未導入のため .ico を生成できません。setup.bat を再実行してください)")
+        except Exception as e:
+            self.log(f"アイコン(.ico)生成失敗: {e}")
+        return None
 
     # ============================================================ ブラウザ準備
     def _ensure_browser(self):
