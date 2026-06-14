@@ -262,11 +262,9 @@ class App(_BaseWindow):
         Tk の iconphoto/iconbitmap は、ttkbootstrap 環境では winfo_id() が
         タイトルバーを持つ実窓と別の内部窓を指すため効かないことがある。
         そこで本GUIスレッドの全ウインドウを列挙し、タイトルを持つ実窓へ直接適用する。
-        実窓は生成が少し遅れるため、適用できるまで複数回リトライする
-        (成功したら _icon_applied を立てて以降はスキップ)。
+        実窓は生成が少し遅れ、かつ Tk が直後に自前アイコンで上書きすることがあるため、
+        複数回のリトライで当て続ける (ログは初回成功時の1回だけ)。
         """
-        if getattr(self, "_icon_applied", False):
-            return
         try:
             import ctypes
             from ctypes import wintypes
@@ -325,8 +323,8 @@ class App(_BaseWindow):
                 return True
 
             u.EnumThreadWindows(tid, WNDENUMPROC(_cb), 0)
-            if state["done"]:
-                self._icon_applied = True
+            if state["done"] and not getattr(self, "_icon_logged", False):
+                self._icon_logged = True
                 self.log("Windowsアイコンを適用しました")
         except Exception as e:
             self.log(f"Windowsアイコン適用に失敗: {e}")
