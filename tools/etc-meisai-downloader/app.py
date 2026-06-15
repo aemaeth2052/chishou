@@ -326,7 +326,8 @@ class App(_BaseWindow):
         """Windows用 .ico のパスを返す。既存が無ければ PNG から生成する。"""
         for c in (resource_path("assets/icon.ico"),
                   BASE_DIR / "assets" / "icon.ico",
-                  Path(sys.executable).resolve().parent / "assets" / "icon.ico"):
+                  Path(sys.executable).resolve().parent / "assets" / "icon.ico",
+                  user_data_dir() / "icon.ico"):  # 前回生成したキャッシュを再利用
             try:
                 if c.exists():
                     return c
