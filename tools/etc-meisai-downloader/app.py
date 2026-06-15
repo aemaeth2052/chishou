@@ -1516,11 +1516,29 @@ if __name__ == "__main__":
     # このモジュールの読み込み時点で実行されるため、ここに到達できた＝同梱は正常。
     # GUIを開かず即終了する (build.py がこの終了コードで配布物の妥当性を確認する)。
     if "--smoke-test" in sys.argv:
-        # console=False の exe では sys.stdout が None になり得るためガードする。
-        # 成否は終了コードで判定するので出力自体は必須ではない。
-        try:
-            sys.stdout.write("smoke-test OK\n")
-        except Exception:
-            pass
-        sys.exit(0)
+        # 配布物の同梱漏れ検証。通常は遅延importされるモジュール
+        # (pywinauto=番割取込, pdf_stamp=PDF書込 等) もここで読み込んで確認する。
+        # 起動時importだけだとこれらの取りこぼしを検知できないため。
+        import importlib
+        mods = ["browser_setup", "downloader", "hks_reader", "pdf_stamp",
+                "playwright.sync_api", "comtypes", "PIL.Image"]
+        if sys.platform == "win32":
+            mods += ["pywinauto", "pywinauto.uia_defines", "pywinauto.application",
+                     "pywintypes", "pythoncom", "win32api"]
+        failed = []
+        for m in mods:
+            try:
+                importlib.import_module(m)
+            except Exception as e:
+                failed.append(f"{m}: {e.__class__.__name__}: {e}")
+        # console=False の exe では sys.stdout/stderr が None になり得る。
+        # ビルド機が結果を確実に読めるよう、指定ファイルにも書き出す。
+        out = os.environ.get("ETC_SMOKE_OUT")
+        if out:
+            try:
+                with open(out, "w", encoding="utf-8") as f:
+                    f.write("OK" if not failed else "FAILED\n" + "\n".join(failed))
+            except Exception:
+                pass
+        sys.exit(1 if failed else 0)
     App().mainloop()

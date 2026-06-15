@@ -5,6 +5,7 @@ build.bat から呼ばれる。PyInstaller で onedir ビルドし、zip に固�
 日本語(アプリ名など)を扱うため、バッチではなくPythonで処理する。
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,7 @@ def check_deps(py):
     importできるか先に確認する。揃っていなければ同梱漏れの配布物になるので、
     ビルド前に止めて原因を明確にする。"""
     code = ("import greenlet._greenlet, playwright, pywinauto, comtypes, "
+            "pywintypes, pythoncom, win32api, "
             "PIL, reportlab, tkcalendar, ttkbootstrap")
     res = subprocess.run([py, "-c", code],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -66,17 +68,26 @@ def smoke_test(dist_dir):
     if not exe.exists():
         print(f"[ERROR] 実行ファイルが見つかりません: {exe}")
         sys.exit(1)
+    result_file = dist_dir / "smoke_test_result.txt"
+    if result_file.exists():
+        result_file.unlink()
+    env = dict(os.environ, ETC_SMOKE_OUT=str(result_file))
     try:
-        res = subprocess.run([str(exe), "--smoke-test"], timeout=120,
+        res = subprocess.run([str(exe), "--smoke-test"], timeout=120, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except subprocess.TimeoutExpired:
         print("[ERROR] 起動チェックがタイムアウトしました。")
         print("        exe を直接実行し『Unhandled exception in script』等の")
         print("        エラーダイアログが出ていないか確認してください (同梱漏れの可能性)。")
         sys.exit(1)
-    if res.returncode != 0:
+    detail = ""
+    if result_file.exists():
+        detail = result_file.read_text(encoding="utf-8", errors="replace").strip()
+        result_file.unlink()  # 配布zipに混ぜない
+    if res.returncode != 0 or detail.startswith("FAILED"):
         print("[ERROR] 配布物が正常に起動しません (依存モジュールの同梱漏れの可能性):")
-        print((res.stdout or b"").decode("utf-8", "replace").strip()[-2000:])
+        print(detail or (res.stdout or b"").decode("utf-8", "replace").strip()[-2000:]
+              or "(詳細不明。exe を直接実行して確認してください)")
         sys.exit(1)
 
 
