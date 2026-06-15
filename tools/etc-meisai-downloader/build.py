@@ -44,6 +44,25 @@ def make_icon(py):
     print(f"  アイコンを生成しました: {ico.name}")
 
 
+def pregenerate_comtypes(py):
+    """pywinauto(UIA)が実行時に使う comtypes 型ライブラリラッパを事前生成する。
+
+    番割取込は Desktop(backend="uia") を使い、その内部で comtypes が
+    UIAutomationCore の Pythonラッパ(comtypes/gen/*)を生成する。frozen exe では
+    実行時にこの生成(書き込み)ができず番割取込が失敗するため、ビルド前に生成して
+    site-packages の comtypes/gen に置き、collect_all('comtypes') で同梱する。"""
+    if sys.platform != "win32":
+        return
+    code = "import pywinauto; pywinauto.Desktop(backend='uia')"
+    res = subprocess.run([py, "-c", code],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if res.returncode != 0:
+        print("  [警告] comtypes(UIA)の事前生成に失敗しました。番割取込が動かない可能性があります:")
+        print("        " + (res.stdout or b"").decode("utf-8", "replace").strip()[-500:])
+    else:
+        print("  comtypes(UIA)ラッパを事前生成しました")
+
+
 def check_deps(py):
     """ビルド機に必要なモジュール (特にC拡張の greenlet._greenlet) が
     importできるか先に確認する。揃っていなければ同梱漏れの配布物になるので、
@@ -100,6 +119,7 @@ def main():
     run([py, "-m", "pip", "install", "-r", str(BASE_DIR / "requirements.txt")],
         stdout=subprocess.DEVNULL)
     check_deps(py)
+    pregenerate_comtypes(py)
     make_icon(py)
 
     print("[2/5] 前回のビルドを削除しています...")

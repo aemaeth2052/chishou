@@ -48,7 +48,9 @@ hiddenimports = (
     + pywinauto_hidden
     + comtypes_hidden
     + pywin32_hidden
-    + ["greenlet", "greenlet._greenlet"]
+    # comtypes.gen: ビルド前に事前生成した UIA ラッパ。frozen exe で実行時生成が
+    # できないため、生成済みモジュールを同梱して番割取込(UIA)を動かす。
+    + ["greenlet", "greenlet._greenlet", "comtypes.gen"]
 )
 
 binaries = (

@@ -992,9 +992,11 @@ class App(_BaseWindow):
                         "同じ車両が複数の現場に割り当てられています。\n"
                         "PDF名は「複数現場」、按分レポートには全現場を記録します。\n\n"
                         + "\n".join(multi_list)))
-            except ImportError:
-                self.log("エラー: pywinauto がインストールされていません。setup.bat を再実行してください")
-                self.set_status("ライブラリが不足しています。setup.bat を再実行してください", kind="error")
+            except ImportError as e:
+                # 実際に読み込めなかったモジュール名を出す。
+                # (pywinauto 本体だけでなく、UIA用の comtypes 生成失敗等も切り分けるため)
+                self.log(f"Hks取込エラー: 必要なモジュールを読み込めません → {e}")
+                self.set_status(f"必要なモジュールの読み込みに失敗: {e}", kind="error")
             except Exception as e:
                 self.log(f"Hks取込エラー: {e}")
                 self.set_status(f"番割予定表の取込に失敗しました: {e}", kind="error")
@@ -1531,6 +1533,15 @@ if __name__ == "__main__":
                 importlib.import_module(m)
             except Exception as e:
                 failed.append(f"{m}: {e.__class__.__name__}: {e}")
+        # UIA(番割取込)は comtypes が型ライブラリラッパを生成して初めて動く。
+        # frozen exe では実行時生成ができないことがあるため、実際に初期化まで試して
+        # 同梱漏れ/生成失敗をビルド時に検出する。
+        if not failed and sys.platform == "win32":
+            try:
+                import hks_reader
+                hks_reader.find_schedule_windows()  # Desktop(backend="uia") を実初期化
+            except Exception as e:
+                failed.append(f"uia-init: {e.__class__.__name__}: {e}")
         # console=False の exe では sys.stdout/stderr が None になり得る。
         # ビルド機が結果を確実に読めるよう、指定ファイルにも書き出す。
         out = os.environ.get("ETC_SMOKE_OUT")
