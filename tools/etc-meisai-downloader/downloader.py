@@ -56,6 +56,11 @@ class EtcMeisaiError(Exception):
     """利用者向けメッセージ付きのエラー"""
 
 
+class LoginFailedError(EtcMeisaiError):
+    """ID/パスワード誤りなどでログインできなかったとき。
+    原因が利用者側で明確なため、画面ダンプ(error_*)は行わない (ノイズ防止)。"""
+
+
 def _find(page, candidates, timeout=10000):
     last_err = None
     for sel in candidates:
@@ -100,6 +105,26 @@ def _dump(page, log, prefix="error"):
 
 # ---------------------------------------------------------------- ログイン
 
+# 注: この ETC 利用照会サービスは、ログイン失敗時にエラーメッセージを出さず
+# 「ただのログイン画面」を返す。そのため画面文言では成否を判定できず、
+# 認証必須ページにアクセスしてログイン画面が返るか (=_looks_like_login) で判定する。
+
+
+def _looks_like_login(page) -> bool:
+    """今表示している画面がログイン画面か (=未ログイン/セッション切れ) を判定する。
+    パスワード欄やログインID欄が残っていればログイン画面とみなす。
+    """
+    try:
+        if page.locator('input[type="password"]').count() > 0:
+            return True
+        for sel in LOGIN_SELECTORS["id"]:
+            if page.locator(sel).count() > 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _login(page, login_id, password, log):
     log("ログインページを開いています...")
     try:
@@ -116,11 +141,29 @@ def _login(page, login_id, password, log):
     _find(page, LOGIN_SELECTORS["pw"]).fill(password)
     _find(page, LOGIN_SELECTORS["btn"]).click()
     page.wait_for_load_state("domcontentloaded")
+    # ログインPOST(セッション確立)が落ち着くのを待つ (best-effort)
+    try:
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
 
-    body = page.inner_text("body")
-    for ng in ("パスワードが正しくありません", "ログインできません", "認証に失敗"):
-        if ng in body:
-            raise EtcMeisaiError("ログインに失敗しました。IDとパスワードを確認してください。")
+    # ログイン成功の確定判定。
+    # このサイトはログイン失敗時、エラーメッセージを出さずにログイン画面を返すため、
+    # 直後の画面の文言では成否を判定できない。そこで「認証が必須の検索条件画面」へ
+    # 実際に遷移できるかで確定する (未ログインだとログイン画面が返ってくる)。
+    # ここで確実に止めないと、失敗に気づかないまま全車両のダウンロードを試み、
+    # 1台ずつタイムアウトして時間を浪費してしまう (本ツールが直したい問題)。
+    try:
+        page.goto(SEARCH_FORM_URL, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+    if _looks_like_login(page):
+        raise LoginFailedError(
+            "ログインに失敗しました。ユーザーIDとパスワードを確認してください。"
+            "（正しいか不安な場合はETC利用照会サービスに直接ログインして確認してください。"
+            "なお連続して失敗するとアカウントがロックされることがあります）"
+        )
     log("ログインしました")
 
 
@@ -403,7 +446,10 @@ def run(login_id, password, date_from, date_to, save_dir,
                 number = str(v.get("number") or "").strip()
                 return f"{name}({number})" if name and number else (name or f"車両{number}" or "全車両")
 
-            # 1巡目: 失敗しても次の車両へ進む
+            # 1巡目: 失敗しても次の車両へ進む。
+            # ただしログイン画面に飛ばされている (セッション切れ/未ログイン) を検知したら、
+            # 残り全車両を試すのは時間の無駄なので、その場で打ち切る。
+            session_lost = False
             for i, v in enumerate(targets):
                 notify(i + 1, len(targets))
                 log(f"[{i + 1}/{len(targets)}] {label_of(v)}: 検索中 ({date_from} 〜 {date_to})")
@@ -420,9 +466,17 @@ def run(login_id, password, date_from, date_to, save_dir,
                     results[i] = {"status": "failed", "detail": str(e), "fare": None}
                     log(f"  → 失敗: {e}")
                     _dump(page, log, prefix="error")
+                    if _looks_like_login(page):
+                        session_lost = True
+                        log("  → ログイン画面に戻されています。"
+                            "ID/パスワード相違かセッション切れの可能性が高いため、"
+                            "残りの車両の処理を中止します。")
+                        break
 
             # 2巡目: 失敗した車両だけ1回リトライ
-            retry_idx = [i for i, r in results.items() if r["status"] == "failed"]
+            # (セッション切れで打ち切った場合はリトライしても同じなので行わない)
+            retry_idx = ([] if session_lost
+                         else [i for i, r in results.items() if r["status"] == "failed"])
             if retry_idx:
                 log(f"--- 失敗した {len(retry_idx)} 台をリトライします ---")
                 for i in retry_idx:
@@ -441,8 +495,11 @@ def run(login_id, password, date_from, date_to, save_dir,
                 log("ログアウトしました")
             except Exception:
                 pass
+        except LoginFailedError:
+            # ID/パスワード誤り。原因が明確なので画面ダンプ(error_*)は残さない
+            raise
         except Exception:
-            # ログイン失敗などの全体エラー
+            # 想定外の全体エラーは原因調査用に画面を保存する
             _dump(page, log, prefix="error")
             raise
         finally:
