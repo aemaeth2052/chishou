@@ -100,6 +100,56 @@ def _dump(page, log, prefix="error"):
 
 # ---------------------------------------------------------------- ログイン
 
+# ログイン失敗時にサイトが表示しがちな文言 (表記ゆれを広めに拾う)。
+# これは「エラーメッセージを分かりやすくする」ためのヒントに過ぎず、
+# 失敗の判定そのものは _logged_in() の積極判定で行う
+# (サイトの文言が変わっても検知できるようにするため)。
+LOGIN_FAIL_TEXTS = (
+    "パスワードが正しくありません",
+    "ログインできません",
+    "ログインに失敗",
+    "認証に失敗",
+    "ID又はパスワード",
+    "IDまたはパスワード",
+    "ＩＤ又はパスワード",
+    "ＩＤまたはパスワード",
+    "パスワードが違います",
+    "パスワードに誤り",
+    "パスワードが相違",
+    "相違しています",
+    "ロックされ",
+    "ロックがかかっ",
+    "一定回数",
+)
+
+
+def _looks_like_login(page) -> bool:
+    """今表示している画面がログイン画面か (=未ログイン/セッション切れ) を判定する。
+    パスワード欄やログインID欄が残っていればログイン画面とみなす。
+    """
+    try:
+        if page.locator('input[type="password"]').count() > 0:
+            return True
+        for sel in LOGIN_SELECTORS["id"]:
+            if page.locator(sel).count() > 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _logged_in(page) -> bool:
+    """ログイン後の認証済み画面に入れているかを積極的に判定する。
+    ログアウトリンクがある or ログイン画面の部品が消えていれば成功とみなす。
+    """
+    try:
+        if page.locator('a:has-text("ログアウト")').count() > 0:
+            return True
+    except Exception:
+        pass
+    return not _looks_like_login(page)
+
+
 def _login(page, login_id, password, log):
     log("ログインページを開いています...")
     try:
@@ -116,11 +166,28 @@ def _login(page, login_id, password, log):
     _find(page, LOGIN_SELECTORS["pw"]).fill(password)
     _find(page, LOGIN_SELECTORS["btn"]).click()
     page.wait_for_load_state("domcontentloaded")
+    # サーバー側のリダイレクト/再描画が落ち着くのを待つ (best-effort)
+    try:
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
 
-    body = page.inner_text("body")
-    for ng in ("パスワードが正しくありません", "ログインできません", "認証に失敗"):
-        if ng in body:
-            raise EtcMeisaiError("ログインに失敗しました。IDとパスワードを確認してください。")
+    # 認証済み画面に入れていなければ、ここで必ず止める。
+    # ここで止めないと、ログイン失敗に気づかないまま全車両でダウンロードを試み、
+    # 1台ずつタイムアウトして時間を浪費してしまう (本ツールが直したい問題)。
+    if not _logged_in(page):
+        hint = ""
+        try:
+            body = page.inner_text("body")
+            for ng in LOGIN_FAIL_TEXTS:
+                if ng in body:
+                    hint = f"（サイト表示: {ng}）"
+                    break
+        except Exception:
+            pass
+        raise EtcMeisaiError(
+            "ログインに失敗しました。IDとパスワードを確認してください。" + hint
+        )
     log("ログインしました")
 
 
@@ -403,7 +470,10 @@ def run(login_id, password, date_from, date_to, save_dir,
                 number = str(v.get("number") or "").strip()
                 return f"{name}({number})" if name and number else (name or f"車両{number}" or "全車両")
 
-            # 1巡目: 失敗しても次の車両へ進む
+            # 1巡目: 失敗しても次の車両へ進む。
+            # ただしログイン画面に飛ばされている (セッション切れ/未ログイン) を検知したら、
+            # 残り全車両を試すのは時間の無駄なので、その場で打ち切る。
+            session_lost = False
             for i, v in enumerate(targets):
                 notify(i + 1, len(targets))
                 log(f"[{i + 1}/{len(targets)}] {label_of(v)}: 検索中 ({date_from} 〜 {date_to})")
@@ -420,9 +490,17 @@ def run(login_id, password, date_from, date_to, save_dir,
                     results[i] = {"status": "failed", "detail": str(e), "fare": None}
                     log(f"  → 失敗: {e}")
                     _dump(page, log, prefix="error")
+                    if _looks_like_login(page):
+                        session_lost = True
+                        log("  → ログイン画面に戻されています。"
+                            "ID/パスワード相違かセッション切れの可能性が高いため、"
+                            "残りの車両の処理を中止します。")
+                        break
 
             # 2巡目: 失敗した車両だけ1回リトライ
-            retry_idx = [i for i, r in results.items() if r["status"] == "failed"]
+            # (セッション切れで打ち切った場合はリトライしても同じなので行わない)
+            retry_idx = ([] if session_lost
+                         else [i for i, r in results.items() if r["status"] == "failed"])
             if retry_idx:
                 log(f"--- 失敗した {len(retry_idx)} 台をリトライします ---")
                 for i in retry_idx:
