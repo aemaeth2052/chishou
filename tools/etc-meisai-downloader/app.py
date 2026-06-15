@@ -175,6 +175,9 @@ class App(_BaseWindow):
         # (前回の取込結果は引き継がない)
         self.hks_records = []
         self.hks_imported_at = ""
+        # 更新なしの番割を読み直さないための取込キャッシュ。
+        # {(営業所, 日付, 更新HH:MM): [records]}。日替わりのため永続化はしない。
+        self._hks_cache = {}
         self.var_hks_status = tk.StringVar()
         self._update_hks_status()
 
@@ -323,7 +326,8 @@ class App(_BaseWindow):
         """Windows用 .ico のパスを返す。既存が無ければ PNG から生成する。"""
         for c in (resource_path("assets/icon.ico"),
                   BASE_DIR / "assets" / "icon.ico",
-                  Path(sys.executable).resolve().parent / "assets" / "icon.ico"):
+                  Path(sys.executable).resolve().parent / "assets" / "icon.ico",
+                  user_data_dir() / "icon.ico"):  # 前回生成したキャッシュを再利用
             try:
                 if c.exists():
                     return c
@@ -904,7 +908,7 @@ class App(_BaseWindow):
                         return
                     metas = [metas[i] for i in chosen]
                 self.log(f"{len(metas)} 画面を取り込みます")
-                records = hks_reader.read_windows(metas, log=self.log)
+                records = hks_reader.read_windows(metas, log=self.log, cache=self._hks_cache)
                 records = self._dedup_hks_windows(records)
                 self.hks_records = records
                 self.hks_imported_at = datetime.datetime.now().strftime("%m/%d %H:%M")
@@ -988,9 +992,11 @@ class App(_BaseWindow):
                         "同じ車両が複数の現場に割り当てられています。\n"
                         "PDF名は「複数現場」、按分レポートには全現場を記録します。\n\n"
                         + "\n".join(multi_list)))
-            except ImportError:
-                self.log("エラー: pywinauto がインストールされていません。setup.bat を再実行してください")
-                self.set_status("ライブラリが不足しています。setup.bat を再実行してください", kind="error")
+            except ImportError as e:
+                # 実際に読み込めなかったモジュール名を出す。
+                # (pywinauto 本体だけでなく、UIA用の comtypes 生成失敗等も切り分けるため)
+                self.log(f"Hks取込エラー: 必要なモジュールを読み込めません → {e}")
+                self.set_status(f"必要なモジュールの読み込みに失敗: {e}", kind="error")
             except Exception as e:
                 self.log(f"Hks取込エラー: {e}")
                 self.set_status(f"番割予定表の取込に失敗しました: {e}", kind="error")
@@ -1508,4 +1514,42 @@ class App(_BaseWindow):
 
 
 if __name__ == "__main__":
+    # ビルド直後の起動チェック用。重い import (playwright/greenlet/pywinauto 等) は
+    # このモジュールの読み込み時点で実行されるため、ここに到達できた＝同梱は正常。
+    # GUIを開かず即終了する (build.py がこの終了コードで配布物の妥当性を確認する)。
+    if "--smoke-test" in sys.argv:
+        # 配布物の同梱漏れ検証。通常は遅延importされるモジュール
+        # (pywinauto=番割取込, pdf_stamp=PDF書込 等) もここで読み込んで確認する。
+        # 起動時importだけだとこれらの取りこぼしを検知できないため。
+        import importlib
+        mods = ["browser_setup", "downloader", "hks_reader", "pdf_stamp",
+                "playwright.sync_api", "comtypes", "PIL.Image"]
+        if sys.platform == "win32":
+            mods += ["pywinauto", "pywinauto.uia_defines", "pywinauto.application",
+                     "pywintypes", "pythoncom", "win32api"]
+        failed = []
+        for m in mods:
+            try:
+                importlib.import_module(m)
+            except Exception as e:
+                failed.append(f"{m}: {e.__class__.__name__}: {e}")
+        # UIA(番割取込)は comtypes が型ライブラリラッパを生成して初めて動く。
+        # frozen exe では実行時生成ができないことがあるため、実際に初期化まで試して
+        # 同梱漏れ/生成失敗をビルド時に検出する。
+        if not failed and sys.platform == "win32":
+            try:
+                import hks_reader
+                hks_reader.find_schedule_windows()  # Desktop(backend="uia") を実初期化
+            except Exception as e:
+                failed.append(f"uia-init: {e.__class__.__name__}: {e}")
+        # console=False の exe では sys.stdout/stderr が None になり得る。
+        # ビルド機が結果を確実に読めるよう、指定ファイルにも書き出す。
+        out = os.environ.get("ETC_SMOKE_OUT")
+        if out:
+            try:
+                with open(out, "w", encoding="utf-8") as f:
+                    f.write("OK" if not failed else "FAILED\n" + "\n".join(failed))
+            except Exception:
+                pass
+        sys.exit(1 if failed else 0)
     App().mainloop()

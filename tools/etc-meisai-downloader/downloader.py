@@ -368,10 +368,10 @@ def run(login_id, password, date_from, date_to, save_dir,
                     # 複数現場に割り当てられた車両 (詳細は按分レポート参照)
                     cust = cust.split(" / ")[0]
                     site = "複数現場"
-                for p in (cust, site):
-                    p = _sanitize_filename(p)[:20]
-                    if p:
-                        parts.append(p)
+                for part in (cust, site):
+                    part = _sanitize_filename(part)[:20]
+                    if part:
+                        parts.append(part)
             dest = save_dir / ("_".join(parts) + ".pdf")
             if dest.exists():
                 if dup_mode == "skip":

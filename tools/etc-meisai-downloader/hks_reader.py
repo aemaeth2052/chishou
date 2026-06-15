@@ -166,6 +166,82 @@ def _snap(ctrl):
     return {"ct": ct, "text": txt, "rect": rect, "children": kids}
 
 
+# ---------------------------------------------------------- 高速読み取り (UIAキャッシュ)
+# pywinauto内部のIUIAutomationとUIA定数を一度だけ取得して使い回す。
+_UIA = {"iuia": None, "subtree": None, "ct_map": None, "props": None}
+
+
+def _uia_handles():
+    """IUIAutomation・Subtreeスコープ・ControlTypeID→名前マップ・プロパティIDを返す。
+
+    初回だけ pywinauto の内部シングルトンから取り出してキャッシュする。
+    """
+    if _UIA["iuia"] is None:
+        from pywinauto.uia_defines import IUIA
+        ui = IUIA()
+        dll = ui.UIA_dll
+        # UIA_TextControlTypeId -> "Text" 等。pywinautoのcontrol_typeと同じ短縮名になる。
+        ct_map = {}
+        for name in dir(dll):
+            if name.startswith("UIA_") and name.endswith("ControlTypeId"):
+                ct_map[getattr(dll, name)] = name[len("UIA_"):-len("ControlTypeId")]
+        _UIA.update({
+            "iuia": ui.iuia,
+            "subtree": ui.tree_scope["subtree"],
+            "ct_map": ct_map,
+            "props": (
+                dll.UIA_ControlTypePropertyId,
+                dll.UIA_NamePropertyId,
+                dll.UIA_BoundingRectanglePropertyId,
+            ),
+        })
+    return _UIA
+
+
+def _snap_cached(ctrl):
+    """部分木をUIAキャッシュで一括取得し、_snapと同じ辞書ツリーを返す。
+
+    種別/名前/矩形 と Subtree スコープを指定して BuildUpdatedCache を1回呼ぶと、
+    部分木全体が1回のプロセス間往復でまとまって取れる。ノードごとに往復する
+    _snap (1ノード4往復) に比べ、数千ノードでは桁違いに速い。
+    """
+    h = _uia_handles()
+    req = h["iuia"].CreateCacheRequest()
+    for pid in h["props"]:
+        req.AddProperty(pid)
+    req.TreeScope = h["subtree"]
+
+    raw = ctrl.element_info.element            # 生のIUIAutomationElement
+    root = raw.BuildUpdatedCache(req)          # ← ここで部分木を一括取得
+    ct_map = h["ct_map"]
+
+    def walk(el):
+        try:
+            ct = ct_map.get(el.CachedControlType, "")
+        except Exception:
+            ct = ""
+        try:
+            txt = el.CachedName or ""
+        except Exception:
+            txt = ""
+        try:
+            r = el.CachedBoundingRectangle
+            rect = (r.left, r.top, r.right, r.bottom)
+        except Exception:
+            rect = (0, 0, 0, 0)
+        kids = []
+        try:
+            arr = el.GetCachedChildren()
+            if arr:
+                for i in range(arr.Length):
+                    kids.append(walk(arr.GetElement(i)))
+        except Exception:
+            pass
+        return {"ct": ct, "text": txt, "rect": rect, "children": kids}
+
+    return walk(root)
+
+
 def is_vehicle(text: str) -> bool:
     """車両欄テキストが実車両か (電車パス・電話・フラグを除く)"""
     t = text.strip()
@@ -312,7 +388,12 @@ def _read_one_window(win, office, date_iso, update_hhmm, update_dt_iso, log):
 
     log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'}"
         f"{' 更新' + update_hhmm if update_hhmm else ''})")
-    root = _snap(pane)
+    try:
+        root = _snap_cached(pane)
+    except Exception as e:
+        # comtypes/pywinautoのバージョン差などで失敗したら従来方式に切替
+        log(f"  高速読み取りに失敗したため通常方式に切り替えます: {e}")
+        root = _snap(pane)
     records = []
     current_customer = None
     for child in root["children"]:
@@ -334,25 +415,46 @@ def _read_one_window(win, office, date_iso, update_hhmm, update_dt_iso, log):
     return records
 
 
-def read_windows(metas, log=print):
+def read_windows(metas, log=print, cache=None):
     """選択された番割ウィンドウだけを読み、現場レコードを返す。
 
     metas: enumerate_windows() の戻りの一部または全部
+    cache: {(営業所, 日付, 更新HH:MM): [records]} の辞書を渡すと、更新時刻が
+           前回から変わっていないウィンドウは再読み取りを省略して再利用する。
+           更新時刻が取れないウィンドウは判定不能なので常に読み直す。
     """
     if not metas:
         return []
     now = datetime.datetime.now()
     records = []
     for m in metas:
-        update_dt = _parse_update_dt(m.get("update_hhmm", ""), now)
+        office = m.get("office", "")
+        date_iso = m.get("date", "")
+        update_hhmm = m.get("update_hhmm", "")
+        sig = (office, date_iso, update_hhmm)
+
+        # 更新時刻が判明していて前回と同一なら、読み取りごと省略して再利用する
+        if cache is not None and update_hhmm and sig in cache:
+            cached = cache[sig]
+            log(f"番割予定表は前回取込から更新なし ({office or '営業所不明'} "
+                f"{date_iso or '日付不明'} 更新{update_hhmm}) → 再利用 {len(cached)} 件")
+            records.extend(cached)
+            continue
+
+        update_dt = _parse_update_dt(update_hhmm, now)
         update_dt_iso = update_dt.isoformat() if update_dt else ""
+        ok = True
         try:
-            records.extend(_read_one_window(
-                m["win"], m.get("office", ""), m.get("date", ""),
-                m.get("update_hhmm", ""), update_dt_iso, log,
-            ))
+            recs = _read_one_window(
+                m["win"], office, date_iso, update_hhmm, update_dt_iso, log,
+            )
         except Exception as e:
             log(f"  読み取りに失敗: {e}")
+            recs, ok = [], False
+        records.extend(recs)
+        # 更新時刻が取れていて、かつ正常に読めたものだけキャッシュする
+        if cache is not None and update_hhmm and ok:
+            cache[sig] = recs
     log(f"読み取り完了: 合計 {len(records)} 件 (予定表 {len(metas)} 画面)")
     return records
 
