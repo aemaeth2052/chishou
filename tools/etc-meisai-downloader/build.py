@@ -43,22 +43,60 @@ def make_icon(py):
     print(f"  アイコンを生成しました: {ico.name}")
 
 
+def check_deps(py):
+    """ビルド機に必要なモジュール (特にC拡張の greenlet._greenlet) が
+    importできるか先に確認する。揃っていなければ同梱漏れの配布物になるので、
+    ビルド前に止めて原因を明確にする。"""
+    code = ("import greenlet._greenlet, playwright, pywinauto, comtypes, "
+            "PIL, reportlab, tkcalendar, ttkbootstrap")
+    res = subprocess.run([py, "-c", code],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if res.returncode != 0:
+        print("[ERROR] ビルド機に必要なモジュールが揃っていません:")
+        print((res.stdout or b"").decode("utf-8", "replace").strip())
+        print("        → pip install -r requirements.txt を実行してから再度ビルドしてください")
+        sys.exit(1)
+
+
+def smoke_test(dist_dir):
+    """ビルドした exe を --smoke-test で起動し、依存モジュールの同梱漏れが
+    ないか (起動時importが通るか) を確認する。GUIは開かず終了コードだけ見る。
+    壊れた配布物を zip 化して配ってしまわないための最終チェック。"""
+    exe = dist_dir / (APP_NAME + (".exe" if sys.platform == "win32" else ""))
+    if not exe.exists():
+        print(f"[ERROR] 実行ファイルが見つかりません: {exe}")
+        sys.exit(1)
+    try:
+        res = subprocess.run([str(exe), "--smoke-test"], timeout=120,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except subprocess.TimeoutExpired:
+        print("[ERROR] 起動チェックがタイムアウトしました。")
+        print("        exe を直接実行し『Unhandled exception in script』等の")
+        print("        エラーダイアログが出ていないか確認してください (同梱漏れの可能性)。")
+        sys.exit(1)
+    if res.returncode != 0:
+        print("[ERROR] 配布物が正常に起動しません (依存モジュールの同梱漏れの可能性):")
+        print((res.stdout or b"").decode("utf-8", "replace").strip()[-2000:])
+        sys.exit(1)
+
+
 def main():
     py = sys.executable
 
-    print("[1/4] ビルドツールを準備しています...")
+    print("[1/5] ビルドツールと依存モジュールを準備しています...")
     run([py, "-m", "pip", "install", "--upgrade", "pip", "pyinstaller"],
         stdout=subprocess.DEVNULL)
     run([py, "-m", "pip", "install", "-r", str(BASE_DIR / "requirements.txt")],
         stdout=subprocess.DEVNULL)
+    check_deps(py)
     make_icon(py)
 
-    print("[2/4] 前回のビルドを削除しています...")
+    print("[2/5] 前回のビルドを削除しています...")
     for d in (BASE_DIR / "build", BASE_DIR / "dist"):
         if d.exists():
             shutil.rmtree(d)
 
-    print("[3/4] PyInstaller でビルドしています (数分かかります)...")
+    print("[3/5] PyInstaller でビルドしています (数分かかります)...")
     run([py, "-m", "PyInstaller", str(BASE_DIR / "app.spec"), "--noconfirm"],
         cwd=str(BASE_DIR))
 
@@ -67,7 +105,11 @@ def main():
         print(f"[ERROR] ビルド結果が見つかりません: {dist_dir}")
         sys.exit(1)
 
-    print("[4/4] 配布用zipを作成しています...")
+    print("[4/5] 配布物の起動チェックをしています...")
+    smoke_test(dist_dir)
+    print("  起動チェック OK (依存モジュールの同梱を確認)")
+
+    print("[5/5] 配布用zipを作成しています...")
     zip_base = BASE_DIR / APP_NAME  # → ETC明細ダウンローダー.zip
     zip_path = Path(shutil.make_archive(str(zip_base), "zip",
                                         root_dir=str(dist_dir.parent),

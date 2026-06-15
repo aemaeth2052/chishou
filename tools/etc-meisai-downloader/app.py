@@ -1512,4 +1512,15 @@ class App(_BaseWindow):
 
 
 if __name__ == "__main__":
+    # ビルド直後の起動チェック用。重い import (playwright/greenlet/pywinauto 等) は
+    # このモジュールの読み込み時点で実行されるため、ここに到達できた＝同梱は正常。
+    # GUIを開かず即終了する (build.py がこの終了コードで配布物の妥当性を確認する)。
+    if "--smoke-test" in sys.argv:
+        # console=False の exe では sys.stdout が None になり得るためガードする。
+        # 成否は終了コードで判定するので出力自体は必須ではない。
+        try:
+            sys.stdout.write("smoke-test OK\n")
+        except Exception:
+            pass
+        sys.exit(0)
     App().mainloop()
