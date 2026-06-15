@@ -7,7 +7,7 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 block_cipher = None
 
@@ -17,6 +17,12 @@ _icon_ico = os.path.join("assets", "icon.ico")
 _icon_png = os.path.join("assets", "icon.png")
 app_icon = _icon_ico if os.path.exists(_icon_ico) else None
 icon_datas = [(_icon_png, "assets")] if os.path.exists(_icon_png) else []
+
+# playwright の同期API(sync_api)は greenlet に依存する。greenlet の本体は
+# コンパイル済みC拡張 greenlet._greenlet (.pyd) で、playwright とは別パッケージのため
+# collect_submodules("playwright") だけでは同梱されない。明示的に集めないと frozen exe で
+# 「No module named 'greenlet._greenlet'」で起動に失敗する。
+greenlet_datas, greenlet_binaries, greenlet_hidden = collect_all("greenlet")
 
 hiddenimports = (
     collect_submodules("ttkbootstrap")
@@ -28,7 +34,11 @@ hiddenimports = (
     + collect_submodules("tkcalendar")
     + collect_submodules("babel")
     + collect_submodules("PIL")
+    + greenlet_hidden
+    + ["greenlet", "greenlet._greenlet"]
 )
+
+binaries = greenlet_binaries
 
 datas = (
     collect_data_files("ttkbootstrap")
@@ -36,13 +46,14 @@ datas = (
     + collect_data_files("reportlab")
     + collect_data_files("tkcalendar")
     + collect_data_files("babel")
+    + greenlet_datas
     + icon_datas
 )
 
 a = Analysis(
     ["app.py"],
     pathex=["."],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
