@@ -56,6 +56,11 @@ class EtcMeisaiError(Exception):
     """利用者向けメッセージ付きのエラー"""
 
 
+class LoginFailedError(EtcMeisaiError):
+    """ID/パスワード誤りなどでログインできなかったとき。
+    原因が利用者側で明確なため、画面ダンプ(error_*)は行わない (ノイズ防止)。"""
+
+
 def _find(page, candidates, timeout=10000):
     last_err = None
     for sel in candidates:
@@ -100,28 +105,9 @@ def _dump(page, log, prefix="error"):
 
 # ---------------------------------------------------------------- ログイン
 
-# ログイン失敗時にサイトが表示しがちな文言 (表記ゆれを広めに拾う)。
-# これは「エラーメッセージを分かりやすくする」ためのヒントに過ぎない。
-# 実際の ETC 利用照会サービスは失敗時にエラー文を出さずログイン画面を返すため、
-# 成否の判定そのものは _looks_like_login() による画面判定で行う
-# (サイトの文言が変わっても検知できるようにするため)。
-LOGIN_FAIL_TEXTS = (
-    "パスワードが正しくありません",
-    "ログインできません",
-    "ログインに失敗",
-    "認証に失敗",
-    "ID又はパスワード",
-    "IDまたはパスワード",
-    "ＩＤ又はパスワード",
-    "ＩＤまたはパスワード",
-    "パスワードが違います",
-    "パスワードに誤り",
-    "パスワードが相違",
-    "相違しています",
-    "ロックされ",
-    "ロックがかかっ",
-    "一定回数",
-)
+# 注: この ETC 利用照会サービスは、ログイン失敗時にエラーメッセージを出さず
+# 「ただのログイン画面」を返す。そのため画面文言では成否を判定できず、
+# 認証必須ページにアクセスしてログイン画面が返るか (=_looks_like_login) で判定する。
 
 
 def _looks_like_login(page) -> bool:
@@ -173,19 +159,10 @@ def _login(page, login_id, password, log):
     except Exception:
         pass
     if _looks_like_login(page):
-        hint = ""
-        try:
-            body = page.inner_text("body")
-            for ng in LOGIN_FAIL_TEXTS:
-                if ng in body:
-                    hint = f"（サイト表示: {ng}）"
-                    break
-        except Exception:
-            pass
-        raise EtcMeisaiError(
+        raise LoginFailedError(
             "ログインに失敗しました。ユーザーIDとパスワードを確認してください。"
             "（正しいか不安な場合はETC利用照会サービスに直接ログインして確認してください。"
-            "なお連続失敗でアカウントがロックされることがあります）" + hint
+            "なお連続して失敗するとアカウントがロックされることがあります）"
         )
     log("ログインしました")
 
@@ -518,8 +495,11 @@ def run(login_id, password, date_from, date_to, save_dir,
                 log("ログアウトしました")
             except Exception:
                 pass
+        except LoginFailedError:
+            # ID/パスワード誤り。原因が明確なので画面ダンプ(error_*)は残さない
+            raise
         except Exception:
-            # ログイン失敗などの全体エラー
+            # 想定外の全体エラーは原因調査用に画面を保存する
             _dump(page, log, prefix="error")
             raise
         finally:
