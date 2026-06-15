@@ -101,8 +101,9 @@ def _dump(page, log, prefix="error"):
 # ---------------------------------------------------------------- ログイン
 
 # ログイン失敗時にサイトが表示しがちな文言 (表記ゆれを広めに拾う)。
-# これは「エラーメッセージを分かりやすくする」ためのヒントに過ぎず、
-# 失敗の判定そのものは _logged_in() の積極判定で行う
+# これは「エラーメッセージを分かりやすくする」ためのヒントに過ぎない。
+# 実際の ETC 利用照会サービスは失敗時にエラー文を出さずログイン画面を返すため、
+# 成否の判定そのものは _looks_like_login() による画面判定で行う
 # (サイトの文言が変わっても検知できるようにするため)。
 LOGIN_FAIL_TEXTS = (
     "パスワードが正しくありません",
@@ -138,18 +139,6 @@ def _looks_like_login(page) -> bool:
     return False
 
 
-def _logged_in(page) -> bool:
-    """ログイン後の認証済み画面に入れているかを積極的に判定する。
-    ログアウトリンクがある or ログイン画面の部品が消えていれば成功とみなす。
-    """
-    try:
-        if page.locator('a:has-text("ログアウト")').count() > 0:
-            return True
-    except Exception:
-        pass
-    return not _looks_like_login(page)
-
-
 def _login(page, login_id, password, log):
     log("ログインページを開いています...")
     try:
@@ -166,16 +155,24 @@ def _login(page, login_id, password, log):
     _find(page, LOGIN_SELECTORS["pw"]).fill(password)
     _find(page, LOGIN_SELECTORS["btn"]).click()
     page.wait_for_load_state("domcontentloaded")
-    # サーバー側のリダイレクト/再描画が落ち着くのを待つ (best-effort)
+    # ログインPOST(セッション確立)が落ち着くのを待つ (best-effort)
     try:
         page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
         pass
 
-    # 認証済み画面に入れていなければ、ここで必ず止める。
-    # ここで止めないと、ログイン失敗に気づかないまま全車両でダウンロードを試み、
+    # ログイン成功の確定判定。
+    # このサイトはログイン失敗時、エラーメッセージを出さずにログイン画面を返すため、
+    # 直後の画面の文言では成否を判定できない。そこで「認証が必須の検索条件画面」へ
+    # 実際に遷移できるかで確定する (未ログインだとログイン画面が返ってくる)。
+    # ここで確実に止めないと、失敗に気づかないまま全車両のダウンロードを試み、
     # 1台ずつタイムアウトして時間を浪費してしまう (本ツールが直したい問題)。
-    if not _logged_in(page):
+    try:
+        page.goto(SEARCH_FORM_URL, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+    if _looks_like_login(page):
         hint = ""
         try:
             body = page.inner_text("body")
@@ -186,7 +183,9 @@ def _login(page, login_id, password, log):
         except Exception:
             pass
         raise EtcMeisaiError(
-            "ログインに失敗しました。IDとパスワードを確認してください。" + hint
+            "ログインに失敗しました。ユーザーIDとパスワードを確認してください。"
+            "（正しいか不安な場合はETC利用照会サービスに直接ログインして確認してください。"
+            "なお連続失敗でアカウントがロックされることがあります）" + hint
         )
     log("ログインしました")
 
