@@ -357,6 +357,49 @@ in
 - 休日補正(引落日が営業日で前後)は Excel の `WORKDAY`+祝日テーブルが楽。
 - **注意**: 日次予測の精度は入力(引落日・空摘要・まとめ振込の内訳)の精度に依存する。完璧な予言ではなく「このままなら○日に底をつく」という**アラート**として使う。実績(CSV)側の日次は正確。
 
+**定例・借入を引落日に展開するMコード**(休日補正は祝日テーブル参照)。残高累積はExcel側の数式 `=前日残高 + SUMIFS(資金繰り明細[入金],資金繰り明細[発生日],当日) − SUMIFS(資金繰り明細[出金],…)` に逃がす:
+```m
+let
+    祝日 = Excel.CurrentWorkbook(){[Name="tbl_祝日"]}[Content][祝日],
+    調整 = (dt as date, rule as text) as date =>
+        let step = if rule = "前営業日" then -1 else 1,
+            f = (x) => if Date.DayOfWeek(x, Day.Monday) >= 5 or List.Contains(祝日, x)
+                       then @f(Date.AddDays(x, step)) else x
+        in f(dt),
+    今月 = Date.StartOfMonth(Date.From(DateTime.LocalNow())),
+    月数 = {0..3},
+    発生 = (mo, day) => if day = "末日" then Date.EndOfMonth(mo) else #date(Date.Year(mo), Date.Month(mo), Number.From(day)),
+    // 定例支払いを引落日に展開
+    定例 = Excel.CurrentWorkbook(){[Name="tbl_定例支払"]}[Content],
+    定例展開 = Table.Combine(List.Transform(月数, (k) =>
+        let mo = Date.AddMonths(今月, k) in
+        Table.AddColumn(定例, "発生日", each 調整(発生(mo,[引落日]), [休日ルール]), type date))),
+    定例F = Table.AddColumn(Table.RenameColumns(Table.SelectColumns(
+        Table.AddColumn(Table.AddColumn(定例展開,"区分",each "出金"),"出金額",each [月額]),
+        {"発生日","区分","支払名","科目","出金額"}), {{"支払名","相手"},{"出金額","出金"}}), "入金", each null),
+    // 借入を引落日に展開(元金+利息)
+    借入 = Table.SelectRows(Excel.CurrentWorkbook(){[Name="tbl_借入"]}[Content], each [毎月元金] <> null),
+    借入展開 = Table.Combine(List.Transform(月数, (k) =>
+        let mo = Date.AddMonths(今月, k) in
+        Table.AddColumn(借入, "発生日", each 調整(発生(mo,[引落日]), [休日ルール]), type date))),
+    借入F = Table.AddColumn(Table.RenameColumns(Table.SelectColumns(
+        Table.AddColumn(Table.AddColumn(Table.AddColumn(借入展開,"区分",each "出金"),"科目",each "借入返済"),
+            "出金額", each [毎月元金] + (if [利息(月)]=null then 0 else [利息(月)])),
+        {"発生日","区分","借入先","科目","出金額"}), {{"借入先","相手"},{"出金額","出金"}}), "入金", each null),
+    // 入金予定(請求PDF)
+    入金 = Excel.CurrentWorkbook(){[Name="tbl_入金予定"]}[Content],
+    入金FF = Table.AddColumn(Table.RenameColumns(Table.SelectColumns(
+        Table.AddColumn(Table.AddColumn(入金,"区分",each "入金"),"科目",each "工事入金"),
+        {"入金予定日","区分","顧客名","科目","請求額(入金総額)"}),
+        {{"入金予定日","発生日"},{"顧客名","相手"},{"請求額(入金総額)","入金"}}), "出金", each null),
+    統合 = Table.Combine({
+        Table.SelectColumns(定例F,{"発生日","区分","相手","科目","入金","出金"}),
+        Table.SelectColumns(借入F,{"発生日","区分","相手","科目","入金","出金"}),
+        Table.SelectColumns(入金FF,{"発生日","区分","相手","科目","入金","出金"})})
+in
+    Table.Sort(統合, {{"発生日", Order.Ascending}})
+```
+
 ---
 
 ## 関連ドキュメント
