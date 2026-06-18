@@ -10,8 +10,8 @@
 
 | 論点 | 結論 |
 |---|---|
-| 実装方式 | **スプレッドシート標準機能で自作**(関数+条件付き書式)。マクロ・専用ソフトは作らない |
-| 共有環境 | **Googleスプレッドシート**(クラウド共有・版管理自動・スマホ可)。社内ドメイン限定+閲覧者を経営陣に絞る |
+| 実装方式 | **Excel標準機能で自作**(Power Query+関数+条件付き書式)。マクロ・専用ソフトは作らない |
+| 共有環境 | **Excel + Power Query**(既存エクセル資産を活用、辞書テーブルを担当者が育成)。実装詳細は §8 |
 | 摘要の変換 | **変換辞書シート+部分一致**で解決(専用ソフト不要) |
 | 対象期間 | **12ヶ月ローリング**(確定月を実績に固定、末尾に新月を追加) |
 
@@ -230,6 +230,83 @@
 □ 共有範囲を社内ドメイン限定+経営陣に絞ったか(残高・取引先は機微情報)
 □ 繰延べの延滞コスト区分で、税・社保・給与を最優先死守に設定したか
 ```
+
+---
+
+## 8. 実装(確定): Excel + Power Query
+
+既存の管理エクセルが Excel であること、辞書を担当者と一緒に育てる運用にすることから、**Excel + Power Query** で実装する(Googleスプレッドシートではなく)。マクロは使わない。
+
+### 銀行CSVの仕様(実物で確認済み・京葉銀行)
+- 文字コード **Shift-JIS(CP932)**。UTF-8 で開くと化けるため、取込時に `Encoding=932` が必須。
+- 先頭列がレコード種別: `1`=ヘッダ / `2`=明細 / `8`=合計。**明細(`2`)だけ**使う。
+- 明細の列順: `日付 / 摘要 / 出金 / 入金 / 残高`。金額は `\1,200,000` 形式。
+- 摘要は**半角カナ**。**促音・拗音が大文字**(`ｱﾒﾂｸｽ`=アメックス)、**長音がハイフン**(`ﾘ-ｽ`)。→ 照合前に正規化(Norm)が必須。
+
+### 変換辞書(担当者が育てる)
+- ブック内に「辞書」という名前のテーブル(列: `キー / 社内呼称 / 科目`)を置く。
+- `キー` は取込結果の摘要から共通部分をコピペ(半角カナのまま)。**長い(具体的)キーほど優先**。
+- 「(未登録)」が出たら辞書に1行足す → 次の[すべて更新]で自動反映。促音・長音の揺れは Norm が吸収する。
+
+### Power Query(M)コード
+```m
+let
+    // === 1. CSV読込(Shift-JIS=932)。パスは自社の保存先に変更 ===
+    Src = Csv.Document(File.Contents("C:\資金繰り\京葉248.csv"),
+        [Delimiter=",", Columns=6, Encoding=932, QuoteStyle=QuoteStyle.Csv]),
+    // === 2. 明細行(レコード種別=2)だけ残す ===
+    Meisai = Table.SelectRows(Src, each [Column1] = "2"),
+    // === 3. 必要な列を取り出して命名 ===
+    Pick = Table.RenameColumns(
+        Table.SelectColumns(Meisai, {"Column2","Column3","Column4","Column5","Column6"}),
+        {{"Column2","日付R"},{"Column3","摘要"},{"Column4","出金R"},{"Column5","入金R"},{"Column6","残高R"}}),
+    // === 4. 金額を数値に(\ , 空白を除去) ===
+    ToNum = (x) => let c = Text.Remove(x, {"\","¥",",","　"," "}) in if c = "" then null else Number.From(c),
+    Kin = Table.AddColumn(Table.AddColumn(Table.AddColumn(Pick,
+            "出金", each ToNum([出金R]), type number), "入金", each ToNum([入金R]), type number),
+            "残高", each ToNum([残高R]), type number),
+    // === 5. 日付を日付型に ===
+    Hi = Table.AddColumn(Kin, "日付", each
+        let d = Text.Select([日付R], {"0".."9"})
+        in try #date(Number.From(Text.Start(d,4)), Number.From(Text.Middle(d,4,2)), Number.From(Text.Middle(d,6,2))) otherwise null, type date),
+    // === 6. 照合用の正規化(小書きカナ→大書き・長音/ハイフン/空白を除去) ===
+    Norm = (t) =>
+        let s0 = if t = null then "" else t,
+            s1 = Text.Remove(s0, {"ー","-","‐","－","ｰ"," ","　"}),
+            map = {{"ｧ","ｱ"},{"ｨ","ｲ"},{"ｩ","ｳ"},{"ｪ","ｴ"},{"ｫ","ｵ"},{"ｯ","ﾂ"},{"ｬ","ﾔ"},{"ｭ","ﾕ"},{"ｮ","ﾖ"}}
+        in List.Accumulate(map, s1, (st, p) => Text.Replace(st, p{0}, p{1})),
+    // === 7. 辞書テーブル(同ブックの「辞書」)をキー長の降順に並べる ===
+    Dic0 = Excel.CurrentWorkbook(){[Name="辞書"]}[Content],
+    DicN = Table.AddColumn(Dic0, "_k", each Norm([キー])),
+    DicS = Table.Sort(Table.AddColumn(DicN, "_len", each Text.Length([_k])), {{"_len", Order.Descending}}),
+    // === 8. 部分一致で社内呼称・科目を付与(最長キー優先) ===
+    Match = (s) => Table.SelectRows(DicS, each [_k] <> "" and Text.Contains(Norm(s), [_k])),
+    Conv = Table.AddColumn(Hi, "社内呼称", each
+        if [摘要] = null or Text.Trim([摘要]) = "" then "★空摘要"
+        else let h = Match([摘要]) in if Table.RowCount(h) > 0 then h{0}[社内呼称] else "(未登録)"),
+    ConvK = Table.AddColumn(Conv, "科目", each
+        let h = Match([摘要]) in if Table.RowCount(h) > 0 then h{0}[科目] else "未分類"),
+    // === 9. 表示する列だけ残す ===
+    Fin = Table.SelectColumns(ConvK, {"日付","摘要","入金","出金","残高","社内呼称","科目"})
+in
+    Fin
+```
+
+### 自動変換率の実績(京葉248・1ヶ月=200明細)
+| 区分 | 割合 | 対応 |
+|---|---|---|
+| 辞書ヒット(自動) | 74% | — |
+| 空摘要 | 17% | 銀行CSVに摘要が無い取引(ATM/手形/窓口/一部引落)。定例支払マスタとの金額・日付照合で推定、残りは手入力。**専用ソフトでも同じ限界** |
+| 未登録 | 8% | 辞書に追記すれば次回から自動 |
+
+- 残高は全明細で連続整合(前残高+入金−出金=残高)を確認済み。
+- この口座1ヶ月で、グループ間移動が **入7,200万/出3,636万** に対し外部の工事入金は **878万**。動きの大半がグループ7法人間の資金融通 → 連結(§3-7)でグループ間を相殺して全体現金を見ることの裏付け。
+
+### 既存日繰りエクセルへのはめ込み(段階的)
+今の様式は月ブロック横並びの手作りレイアウトのため、一気に流し込まず順に進める。
+1. 本ブックで口座ごとにクエリ(`取込_口座番号`)を作り、整形明細を出す。
+2. 既存シートの該当口座エリアへ貼付/参照する。
+3. 3口座→両行合計→他法人→連結サマリーへ積み上げ、§3-7 の連結ビューにする。
 
 ---
 
