@@ -138,10 +138,12 @@ def cluster_key(c):
 
 # ------------------------------------------------------------- ブロック→作業員
 def worker_rects(block):
-    """1ブロックから (作業員名, 矩形) のリストを返す。
+    """1ブロックから (整形名, 生テキスト, 矩形) のリストを返す。
 
     hks_reader._parse_block と同じ「右側 Custom = 作業員」判定を使うが、
-    色サンプリング用に矩形も持って返すのが違い。
+    色サンプリング用に矩形を、印(応援/外注のラベル)確認用に生テキストを併せて返す。
+    ※ 応援/外注は「名前に印が付く」とのことなので、_clean_worker_name で
+       消える前の生テキストを必ず残す。
     """
     fields = hr._fields_of(block)
     bl, _, br, _ = block["rect"]
@@ -157,9 +159,10 @@ def worker_rects(block):
         if not texts:
             continue
         last = texts[-1]  # 作業員名は末尾テキスト
-        name = hr._clean_worker_name(last["text"])
+        raw = last["text"].strip()
+        name = hr._clean_worker_name(raw)
         if name:
-            out.append((name, last["rect"]))
+            out.append((name, raw, last["rect"]))
     return out
 
 
@@ -215,7 +218,8 @@ def main():
         w("#" * 78)
         w(f"# {office}  {date_iso}")
         w("#" * 78)
-        w(f"{'顧客':<16}{'現場':<22}{'作業員':<12}{'文字色':<9}{'背景':<9}矩形")
+        w(f"{'顧客':<16}{'現場':<20}{'整形名':<10}{'生テキスト(印確認)':<18}"
+          f"{'文字色':<9}車両")
         w("-" * 78)
 
         current_customer = None
@@ -230,12 +234,13 @@ def main():
                 rec = hr._parse_block(child, current_customer)
                 site = rec["site"]
                 has_vehicle = "○" if rec["vehicle_no"] else "×"
-                for name, rect in worker_rects(child):
+                for name, raw, rect in worker_rects(child):
                     total_workers += 1
                     tc, bg = text_color(sampler, rect)
-                    w(f"{current_customer[:14]:<16}{site[:20]:<22}"
-                      f"{name[:10]:<12}{hexc(tc):<9}{hexc(bg):<9}"
-                      f"{tuple(rect)}  車両{has_vehicle}")
+                    raw_disp = raw if raw != name else ""  # 印があるときだけ表示
+                    w(f"{current_customer[:14]:<16}{site[:18]:<20}"
+                      f"{name[:8]:<10}{raw_disp[:16]:<18}"
+                      f"{hexc(tc):<9}{has_vehicle}")
                     if tc is not None:
                         color_members[cluster_key(tc)].append(
                             (name, f"{current_customer}:{site}", hexc(tc))
