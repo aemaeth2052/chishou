@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
 """作業員稼働率の集計
 
-番割(全作業員)と社員名簿CSVを突き合わせ、自社作業員の稼働率を出す。
+番割(全作業員)と社員名簿CSVを突き合わせ、自営業所(宮崎)作業員の稼働率を出す。
 
-定義(ユーザー確認済み 2026-06):
-  ・番割に載る作業員は全員、第一元商が差配した人(自社＋借りた応援)。
-  ・自社作業員       = 名簿(在籍)にマッチした人。
-  ・応援(外注)作業員 = 名簿に無い人。別集計する(=借りた人工)。
-  ・外貨を産む現場    = 顧客名に除外キーワード(既定: 第一元商 / 宮崎興業)を
-                       含まない現場。管理費(送迎応援・寮清掃など)は除外する。
+区分の判定(ユーザー確認済み 2026-06):
+  番割では作業員の所属営業所が氏名前のバッジ(蘇我/若松/八幡/都賀/加曽利/宮崎 等)で
+  示される。これと宮崎名簿を使って次の3区分に分ける。
 
-  稼働率 = 外貨を産む現場に出た自社作業員数 ÷ 在籍自社作業員数
+    ・宮崎自営業所  … バッジが「宮崎」or バッジ無し&宮崎名簿にマッチ
+    ・他営業所応援  … 宮崎以外の営業所バッジが付く人(=他営業所から宮崎へ応援)
+    ・集計対象外    … バッジ無し&宮崎名簿に無い人(他営業所の自前労務。宮崎に無関係)
+
+  外貨を産む現場 = 顧客名に除外キーワード(既定: 第一元商 / 宮崎興業)を含まない現場。
+  管理費(送迎応援・寮清掃など)は分子から外す。
+
+  稼働率 = 外貨を産む現場に出た宮崎社員数 ÷ 在籍宮崎社員数
+
+  他営業所応援は「借りた人工」として別集計。集計対象外はカウントしない。
 
 突合の注意:
   日本人はフルネーム(姓名)で一致する。外国人は番割が短縮ニックネーム表示の
@@ -37,6 +43,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ALIASES_PATH = HERE / "name_aliases.json"
 DEFAULT_EXCLUDE = ("第一元商", "宮崎興業")
+HOME_OFFICE = "宮崎"  # 自営業所。バッジにこの語を含めば自営業所扱い
 
 # 名簿CSVの列位置(Hks 出力。ヘッダ: コード,名称,フリガナ,営業所,区分,備考,Bk,在,…)
 COL_CODE, COL_NAME, COL_FURI, COL_NOTE, COL_ACTIVE = 0, 1, 2, 5, 7
@@ -92,8 +99,18 @@ def load_roster(csv_path, active_only=True):
     return out
 
 
+def _office_of(badge):
+    """バッジ文字列から所属営業所を取り出す。空なら ''。"""
+    b = (badge or "").strip()
+    # 「都賀営業所」など「営業所」表記を除いて営業所名だけにする
+    return b.replace("営業所", "").strip()
+
+
 class Matcher:
-    """番割の表示名 → 自社(コード) / 応援 を判定する。"""
+    """番割の (表示名, バッジ) → 区分 を判定する。
+
+    区分: 'miyazaki'(宮崎自営業所) / 'other'(他営業所応援) / 'ignore'(集計対象外)
+    """
 
     def __init__(self, roster, aliases=None):
         self.aliases = aliases or {}
@@ -107,20 +124,34 @@ class Matcher:
                 if _is_kana(t):
                     self.kana_tok.setdefault(_norm(t), e.code)
 
-    def classify(self, name):
-        """(kind, code) を返す。kind は 'own' か 'support'。code は分かれば名簿コード。"""
-        # 手動補正が最優先
-        if name in self.aliases:
-            v = self.aliases[name]
-            if v in ("応援", "support", ""):
-                return "support", None
-            return "own", v
+    def in_roster(self, name):
         n = _norm(name)
         if n in self.full:
-            return "own", self.full[n]
+            return self.full[n]
         if _is_kana(name) and n in self.kana_tok:
-            return "own", self.kana_tok[n]
-        return "support", None
+            return self.kana_tok[n]
+        return None
+
+    def classify(self, name, badge=""):
+        """(区分, 名簿コード) を返す。"""
+        # 手動補正が最優先(番割表示名 -> 名簿コード or 'other'/'ignore')
+        if name in self.aliases:
+            v = self.aliases[name]
+            if v in ("other", "他営業所", "応援"):
+                return "other", None
+            if v in ("ignore", "対象外", ""):
+                return "ignore", None
+            return "miyazaki", v
+        office = _office_of(badge)
+        if office and HOME_OFFICE not in office:
+            return "other", None        # 他営業所バッジ → 他営業所応援
+        # バッジが宮崎、またはバッジ無し
+        code = self.in_roster(name)
+        if office and HOME_OFFICE in office:
+            return "miyazaki", code     # 宮崎バッジ → 宮崎(名簿外でも宮崎)
+        if code:
+            return "miyazaki", code     # バッジ無し&名簿○ → 宮崎
+        return "ignore", None           # バッジ無し&名簿× → 他営業所の自前労務
 
 
 # --------------------------------------------------------------------- 集計
@@ -131,47 +162,59 @@ def is_excluded(customer, keywords):
 def compute(assignments, matcher, exclude_keywords, roster_size):
     """稼働率レポート(dict)を返す。
 
-    assignments: [{customer, site, worker, ...}]
+    assignments: [{customer, site, worker, badge, ...}]
     """
-    own_rev, own_ovh = {}, {}      # code or name -> 代表エントリ(重複排除)
-    sup_rev, sup_ovh = [], []
-    own_on_board = set()
+    miya_rev, miya_ovh = {}, {}     # key -> 氏名(重複排除)
+    miya_on = set()
+    oth_rev, oth_ovh = [], []       # (氏名, バッジ, 顧客, 現場)
+    ignored = []
     details = []
 
     for a in assignments:
         cust, site, worker = a["customer"], a["site"], a["worker"]
-        kind, code = matcher.classify(worker)
+        badge = a.get("badge", "")
+        kind, code = matcher.classify(worker, badge)
         excluded = is_excluded(cust, exclude_keywords)
-        key = code or worker  # 同一人物の重複は名簿コードで排除(無ければ名前)
-        if kind == "own":
-            own_on_board.add(key)
-            (own_ovh if excluded else own_rev)[key] = worker
+        field = "管理費" if excluded else "外貨"
+        if kind == "miyazaki":
+            key = code or worker
+            miya_on.add(key)
+            (miya_ovh if excluded else miya_rev)[key] = worker
+            label = "宮崎"
+        elif kind == "other":
+            (oth_ovh if excluded else oth_rev).append((worker, badge, cust, site))
+            label = "他営業所応援"
         else:
-            (sup_ovh if excluded else sup_rev).append((worker, cust, site))
+            ignored.append((worker, cust, site))
+            label = "対象外"
         details.append({
-            "worker": worker, "customer": cust, "site": site,
-            "kind": "自社" if kind == "own" else "応援",
-            "field": "管理費" if excluded else "外貨",
+            "worker": worker, "badge": badge, "customer": cust, "site": site,
+            "kind": label, "field": field,
         })
 
-    own_rev_n = len(own_rev)
-    own_ovh_only = len([k for k in own_ovh if k not in own_rev])
-    idle = roster_size - len(own_on_board)
-    util = (own_rev_n / roster_size) if roster_size else 0.0
+    miya_rev_n = len(miya_rev)
+    miya_ovh_only = len([k for k in miya_ovh if k not in miya_rev])
+    idle = roster_size - len(miya_on)
+    util = (miya_rev_n / roster_size) if roster_size else 0.0
+
+    # 他営業所応援の営業所別内訳
+    by_office = {}
+    for w, b, c, s in oth_rev + oth_ovh:
+        by_office[_office_of(b) or "(不明)"] = by_office.get(_office_of(b) or "(不明)", 0) + 1
 
     return {
         "roster_size": roster_size,
         "assignments": len(assignments),
-        "own_total": len(own_on_board),
-        "own_revenue": own_rev_n,
-        "own_overhead": own_ovh_only,
-        "own_idle": idle,
-        "support_revenue": len(sup_rev),
-        "support_overhead": len(sup_ovh),
+        "miya_revenue": miya_rev_n,
+        "miya_overhead": miya_ovh_only,
+        "miya_idle": idle,
+        "miya_overhead_list": sorted({miya_ovh[k] for k in miya_ovh
+                                      if k not in miya_rev}),
+        "other_revenue": len(oth_rev),
+        "other_overhead": len(oth_ovh),
+        "other_by_office": by_office,
+        "ignored": len(ignored),
         "utilization": util,
-        "own_overhead_list": sorted({own_ovh[k] for k in own_ovh}),
-        "support_revenue_list": sup_rev,
-        "support_overhead_list": sup_ovh,
         "details": details,
     }
 
@@ -179,26 +222,33 @@ def compute(assignments, matcher, exclude_keywords, roster_size):
 def render(report, exclude_keywords):
     L = []
     L.append("=" * 66)
-    L.append("作業員稼働率レポート")
+    L.append("宮崎営業所 作業員稼働率レポート")
     L.append("=" * 66)
     L.append(f"除外(外貨を産まない)顧客キーワード: {' / '.join(exclude_keywords)}")
     L.append("")
-    L.append(f"在籍自社作業員(分母)      : {report['roster_size']:>4} 名")
-    L.append(f"番割の作業員(自社＋応援)  : {report['assignments']:>4} 名")
+    L.append(f"在籍 宮崎社員(分母)      : {report['roster_size']:>4} 名")
+    L.append(f"番割の作業員(全営業所)   : {report['assignments']:>4} 名")
     L.append("-" * 66)
     util = report["utilization"] * 100
-    L.append(f"★ 稼働率 = 外貨現場に出た自社 {report['own_revenue']} "
+    L.append(f"★ 稼働率 = 外貨現場の宮崎社員 {report['miya_revenue']} "
              f"÷ 在籍 {report['roster_size']} = {util:.1f}%")
     L.append("-" * 66)
-    L.append("【自社作業員の内訳】")
-    L.append(f"  外貨を産む現場に配置 : {report['own_revenue']:>4} 名  ← 稼働")
-    L.append(f"  管理費現場に配置     : {report['own_overhead']:>4} 名  "
-             f"{report['own_overhead_list']}")
-    L.append(f"  番割に無し(休/待機)  : {report['own_idle']:>4} 名")
+    L.append("【宮崎社員の内訳】")
+    L.append(f"  外貨を産む現場に配置 : {report['miya_revenue']:>4} 名  ← 稼働")
+    L.append(f"  管理費現場に配置     : {report['miya_overhead']:>4} 名  "
+             f"{report['miya_overhead_list']}")
+    L.append(f"  番割に無し(休/待機)  : {report['miya_idle']:>4} 名")
     L.append("")
-    L.append("【応援(借りた人工)・別集計】")
-    L.append(f"  外貨を産む現場       : {report['support_revenue']:>4} 名")
-    L.append(f"  管理費現場           : {report['support_overhead']:>4} 名")
+    L.append("【他営業所からの応援(借りた人工)・別集計】")
+    L.append(f"  外貨を産む現場       : {report['other_revenue']:>4} 名")
+    L.append(f"  管理費現場           : {report['other_overhead']:>4} 名")
+    office_str = "  ".join(f"{k}{v}" for k, v in
+                           sorted(report["other_by_office"].items(),
+                                  key=lambda x: -x[1]))
+    if office_str:
+        L.append(f"  営業所別             : {office_str}")
+    L.append("")
+    L.append(f"【集計対象外】他営業所の自前労務 : {report['ignored']:>4} 名")
     L.append("=" * 66)
     return "\n".join(L)
 
@@ -210,17 +260,27 @@ def assignments_from_hks():
 
 
 def assignments_from_inspect(path):
-    """workers_inspect.txt から (customer, site, worker) を復元(検証用)。"""
+    """workers_inspect.txt から (customer, site, worker, badge) を復元(検証用)。
+
+    新フォーマット(顧客/現場/氏名/バッジ/背景色/車両)を想定。背景色とバッジを
+    取り違えないよう、# 始まりを背景色、○×を車両として除外した残りをバッジとみなす。
+    """
     out = []
     for ln in Path(path).read_text(encoding="utf-8").splitlines():
-        if ln.startswith(("#", "=", "-", "番割", "顧客", "色取得", "作業員 総数")):
+        if ln.startswith(("#", "=", "-", "番割", "顧客", "色取得", "作業員", "※")):
             continue
         parts = re.split(r" {2,}", ln.rstrip())
         if len(parts) < 3 or not parts[2].strip():
             continue
+        badge = ""
+        for x in parts[3:]:
+            x = x.strip()
+            if x and not x.startswith("#") and x not in ("○", "×"):
+                badge = x
         out.append({"customer": parts[0].strip(),
                     "site": parts[1].strip(),
-                    "worker": parts[2].strip()})
+                    "worker": parts[2].strip(),
+                    "badge": badge})
     return out
 
 
@@ -257,9 +317,10 @@ def main():
     # 明細CSV(Excelで開ける Shift-JIS)
     with open(args.csv, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["作業員", "区分", "現場種別", "顧客", "現場"])
+        w.writerow(["作業員", "バッジ", "区分", "現場種別", "顧客", "現場"])
         for d in report["details"]:
-            w.writerow([d["worker"], d["kind"], d["field"], d["customer"], d["site"]])
+            w.writerow([d["worker"], d["badge"], d["kind"], d["field"],
+                        d["customer"], d["site"]])
 
     print(f"\nレポート: {args.out}")
     print(f"明細CSV : {args.csv}")

@@ -477,14 +477,41 @@ def build_vehicle_map(records):
     return m
 
 
+def worker_badges(block):
+    """1ブロックから (作業員名, 営業所バッジ) のリストを返す。
+
+    番割では作業員の所属営業所が氏名の前のバッジ(蘇我/若松/八幡/都賀/加曽利/宮崎 等)
+    で示される。_parse_block の workers はバッジを落とすので、稼働率の営業所判定用に
+    ここでバッジ込みで取り出す。氏名セル内の末尾テキスト=氏名、それより前=バッジ。
+    """
+    fields = _fields_of(block)
+    bl, _, br, _ = block["rect"]
+    mid_x = (bl + br) / 2
+    out = []
+    for f in fields:
+        if f["ct"] != "Custom":
+            continue
+        cx = (f["rect"][0] + f["rect"][2]) / 2
+        if cx <= mid_x:
+            continue  # 左側は車両・フラグ
+        texts = [c["text"].strip() for c in f["children"] if c["text"].strip()]
+        if not texts:
+            continue
+        name = _clean_worker_name(texts[-1])
+        badge = " ".join(texts[:-1]).strip()
+        if name:
+            out.append((name, badge))
+    return out
+
+
 def read_all_assignments(log=print):
     """番割の「全作業員」を返す。稼働率計測用。
 
     read_windows / read_schedule は ETC 突合が目的のため車両が割り当たった
     ブロックしか残さない。稼働率では車両の有無に関係なく全作業員が要るので、
-    こちらはフィルタせず作業員1人につき1行を返す。
+    こちらはフィルタせず作業員1人につき1行を返す。営業所バッジも併せて返す。
 
-    Returns: [{office, date, customer, site, worker}]
+    Returns: [{office, date, customer, site, worker, badge}]
     """
     metas = enumerate_windows()
     if not metas:
@@ -523,13 +550,14 @@ def read_all_assignments(log=print):
                     current_customer = None
             elif child["ct"] == "Custom" and current_customer:
                 rec = _parse_block(child, current_customer)
-                for wname in rec["workers"]:
+                for wname, badge in worker_badges(child):
                     rows.append({
                         "office": office,
                         "date": date_iso,
                         "customer": current_customer,
                         "site": rec["site"],
                         "worker": wname,
+                        "badge": badge,
                     })
         log(f"  {office or '営業所不明'} {date_iso or '日付不明'}: "
             f"{len(rows) - before} 名")
