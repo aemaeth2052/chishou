@@ -49,6 +49,7 @@ HERE = Path(__file__).resolve().parent
 ALIASES_PATH = HERE / "name_aliases.json"
 SETTINGS_PATH = HERE / "utilization_settings.json"
 HISTORY_PATH = HERE / "utilization_history.csv"
+REVIEW_PATH = HERE / "utilization_review.csv"
 DEFAULT_EXCLUDE = ("第一元商", "宮崎興業")
 
 DEFAULT_SETTINGS = {
@@ -239,6 +240,7 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
     oth_office = {}                   # key -> 他営業所キー
     ign = set()
     details = []
+    review = {}                       # 取りこぼし候補(氏名 -> 1件)
 
     for a in rows:
         cust, site, worker = a["customer"], a["site"], a["worker"]
@@ -267,6 +269,20 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
                         "field": "管理費" if exc else "外貨",
                         "customer": cust, "site": site})
 
+        # 取りこぼし候補: 自社かもしれないのに対象外/名簿未照合になっている人。
+        # 日本人フルネームは確実に一致するので、対象はカナ(外国人)と自社タグ未照合のみ。
+        reason = None
+        if kind == "ignore" and _is_kana(worker):
+            reason = ("要確認", "対象外(他営業所自前)",
+                      "自社の外国人かも→ name_aliases.json にコードを書けば自社に算入")
+        elif kind == "home" and code is None:
+            reason = ("確認推奨", "自社(名簿未照合)",
+                      "自社タグだが名簿に無い→ name_aliases.json にコード指定を推奨")
+        if reason and worker not in review:
+            review[worker] = {"priority": reason[0], "office": office, "date": date,
+                              "worker": worker, "badge": badge, "current": reason[1],
+                              "customer": cust, "site": site, "hint": reason[2]}
+
     present = len(home_on)            # 番割に出ている自営業所社員(出勤)
     num = len(home_rev)               # うち外貨現場(=分子)
     ovh_only = len(home_ovh - home_rev)
@@ -290,6 +306,7 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
         "other_by_office": dict(by_office),
         "ignored": len(ign),
         "details": details,
+        "review": list(review.values()),
     }
 
 
@@ -409,6 +426,8 @@ def main():
     ap.add_argument("--csv", default=str(HERE / "utilization_detail.csv"))
     ap.add_argument("--history", default=str(HISTORY_PATH),
                     help="日次履歴CSVの保存先(同じ日付・営業所は上書き)")
+    ap.add_argument("--review", default=str(REVIEW_PATH),
+                    help="取りこぼし候補CSVの保存先")
     args = ap.parse_args()
 
     roster = load_rosters(args.roster, active_only=True)
@@ -453,11 +472,30 @@ def main():
 
     append_history(args.history, reports)
 
+    # 取りこぼし候補(自社かもしれないのに対象外/名簿未照合)を別CSVに
+    prio = {"要確認": 0, "確認推奨": 1}
+    review = []
+    for r in reports:
+        review.extend(r["review"])
+    review.sort(key=lambda x: (prio.get(x["priority"], 9), x["office"], x["worker"]))
+    with open(args.review, "w", encoding="cp932", errors="replace", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["優先", "営業所", "日付", "氏名(対照表のキー)", "バッジ",
+                    "現在の判定", "顧客", "現場", "対応のヒント"])
+        for x in review:
+            w.writerow([x["priority"], x["office"], x["date"], x["worker"], x["badge"],
+                        x["current"], x["customer"], x["site"], x["hint"]])
+
+    n_check = sum(1 for x in review if x["priority"] == "要確認")
+    n_reco = sum(1 for x in review if x["priority"] == "確認推奨")
+
     print(f"\nレポート: {args.out}")
     print(f"明細CSV : {args.csv}")
     print(f"日次履歴: {args.history}  (番割 {len(reports)} 営業所ぶんを記録)")
-    if not ALIASES_PATH.exists():
-        print(f"\n※ 外国人ニックネームの取りこぼしは {ALIASES_PATH.name} で補正できます")
+    print(f"取りこぼし候補: {args.review}  "
+          f"(要確認 {n_check} 件 / 確認推奨 {n_reco} 件)")
+    if review:
+        print("  → 自社の人が混じっていたら name_aliases.json にコードを追記してください")
 
 
 if __name__ == "__main__":

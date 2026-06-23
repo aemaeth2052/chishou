@@ -16,6 +16,7 @@ utilization_settings.json
 utilization_history.csv
 utilization_report.txt
 utilization_detail.csv
+utilization_review.csv
 workers_inspect.txt
 workers_colors.txt
 hks_records.txt
