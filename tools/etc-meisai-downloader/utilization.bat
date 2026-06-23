@@ -1,6 +1,7 @@
 @echo off
 rem === Worker utilization calculator (ASCII only in this file) ===
-rem Usage: drag the roster CSV onto this .bat, or place it as roster.csv here.
+rem Roster: put each office's CSV into a "roster" folder next to this .bat
+rem (the tool reads every *.csv there), or drop a single CSV onto this .bat.
 cd /d "%~dp0"
 
 set "PYCMD="
@@ -12,11 +13,14 @@ if not defined PYCMD (
     exit /b 1
 )
 
+rem Pick roster source: dragged file > roster\ folder > roster.csv
 set "ROSTER=%~1"
+if "%ROSTER%"=="" if exist "%~dp0roster\" set "ROSTER=%~dp0roster"
 if "%ROSTER%"=="" set "ROSTER=%~dp0roster.csv"
 if not exist "%ROSTER%" (
-    echo [ERROR] Roster CSV not found: %ROSTER%
-    echo Drag the roster CSV onto this .bat, or save it as roster.csv here.
+    echo [ERROR] Roster not found: %ROSTER%
+    echo Put each office CSV into a "roster" folder here, or save one as roster.csv,
+    echo or drag a CSV onto this .bat.
     pause
     exit /b 1
 )

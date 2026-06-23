@@ -118,6 +118,35 @@ def load_roster(csv_path, active_only=True):
     return out
 
 
+def load_rosters(paths, active_only=True):
+    """複数の名簿CSV(営業所ごとに分かれていてもよい)をまとめて読む。
+
+    paths にはファイルとフォルダを混在指定できる。フォルダは中の *.csv を全部読む。
+    同じコードの社員が重複したら最初の1件を採用する。
+    各社員は自分のCSVの「営業所」列から営業所キーを持つので、番割ごとの絞り込みは
+    そのキーで自動的に効く。
+    """
+    files = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            files.extend(sorted(p.glob("*.csv")) + sorted(p.glob("*.CSV")))
+        elif p.exists():
+            files.append(p)
+        else:
+            raise RuntimeError(f"名簿が見つかりません: {p}")
+    if not files:
+        raise RuntimeError("名簿CSVが1つも見つかりません")
+    seen, out = set(), []
+    for f in files:
+        for e in load_roster(f, active_only=active_only):
+            if e.code in seen:
+                continue
+            seen.add(e.code)
+            out.append(e)
+    return out
+
+
 class Matcher:
     """ある営業所(home)について、番割の (表示名, バッジ) → 区分 を判定する。
 
@@ -177,7 +206,8 @@ def compute_board(office, date, rows, roster, exclude, aliases):
     roster: 名簿全体(Employee)。この営業所ぶんに絞って使う。
     """
     home = office_key(office)
-    subset = [e for e in roster if e.office == home] or roster
+    subset = [e for e in roster if e.office == home]
+    roster_missing = not subset  # この営業所の名簿が無い(別営業所のみ渡された等)
     matcher = Matcher(home, subset, aliases)
 
     home_on, home_rev, home_ovh = set(), set(), set()
@@ -225,6 +255,7 @@ def compute_board(office, date, rows, roster, exclude, aliases):
 
     return {
         "office": office, "date": date,
+        "roster_missing": roster_missing,
         "roster_size": roster_size,
         "denominator": den, "revenue": num, "overhead_only": ovh_only,
         "idle": idle, "rate": rate,
@@ -241,6 +272,10 @@ def render_board(r, exclude):
     L.append("=" * 66)
     L.append(f"作業員稼働率  {r['office']}  {r['date']}")
     L.append("=" * 66)
+    if r.get("roster_missing"):
+        L.append("⚠ この営業所の名簿が読み込まれていません。"
+                 "稼働率は不正確です(その営業所の名簿CSVを渡してください)。")
+        L.append("-" * 66)
     rate = r["rate"] * 100
     L.append(f"★ 稼働率 = 外貨現場 {r['revenue']} ÷ 出勤 {r['denominator']} "
              f"= {rate:.1f}%")
@@ -336,7 +371,9 @@ def assignments_from_inspect(path):
 
 def main():
     ap = argparse.ArgumentParser(description="作業員稼働率の集計(営業所ごと)")
-    ap.add_argument("--roster", required=True, help="社員名簿CSV(Shift-JIS。全営業所可)")
+    ap.add_argument("--roster", required=True, nargs="+",
+                    help="社員名簿CSV(Shift-JIS)。営業所ごとに複数指定可。"
+                         "フォルダを渡すと中の*.csvを全部読む")
     ap.add_argument("--inspect", help="workers_inspect.txt から計算(指定時は番割を読まない)")
     ap.add_argument("--exclude", nargs="*", default=list(DEFAULT_EXCLUDE),
                     help="外貨を産まない顧客キーワード(既定: 第一元商 宮崎興業)")
@@ -346,7 +383,7 @@ def main():
                     help="日次履歴CSVの保存先(同じ日付・営業所は上書き)")
     args = ap.parse_args()
 
-    roster = load_roster(args.roster, active_only=True)
+    roster = load_rosters(args.roster, active_only=True)
     aliases = {}
     if ALIASES_PATH.exists():
         raw = json.loads(ALIASES_PATH.read_text(encoding="utf-8"))
