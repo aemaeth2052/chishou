@@ -7,3 +7,17 @@ build/
 dist/
 *.zip
 *.spec.bak
+
+# 稼働率ツールのユーザーデータ・生成物(自社固有・Git管理外)
+roster.csv
+roster/
+name_aliases.json
+utilization_settings.json
+utilization_history.csv
+utilization_report.txt
+utilization_detail.csv
+workers_inspect.txt
+workers_colors.txt
+hks_records.txt
+inspect_result.txt
+hks_tree.txt

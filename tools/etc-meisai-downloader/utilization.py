@@ -47,8 +47,28 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ALIASES_PATH = HERE / "name_aliases.json"
+SETTINGS_PATH = HERE / "utilization_settings.json"
 HISTORY_PATH = HERE / "utilization_history.csv"
 DEFAULT_EXCLUDE = ("第一元商", "宮崎興業")
+
+DEFAULT_SETTINGS = {
+    # 外貨を産まない(管理費)現場の判定。いずれも「部分一致」で除外する。
+    "exclude_customer_keywords": list(DEFAULT_EXCLUDE),  # 顧客名に含まれたら除外
+    "exclude_site_keywords": [],                          # 現場名に含まれたら除外
+}
+
+
+def load_settings(path):
+    """例外設定(除外キーワード)を読む。無ければ既定値。"""
+    s = {k: list(v) for k, v in DEFAULT_SETTINGS.items()}
+    p = Path(path)
+    if p.exists():
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        for k in ("exclude_customer_keywords", "exclude_site_keywords"):
+            v = raw.get(k)
+            if isinstance(v, list):
+                s[k] = [str(x) for x in v if str(x).strip()]
+    return s
 
 # 名簿CSVの列位置(Hks 出力。ヘッダ: コード,名称,フリガナ,営業所,区分,備考,Bk,在,…)
 COL_CODE, COL_NAME, COL_FURI, COL_OFFICE, COL_NOTE, COL_ACTIVE = 0, 1, 2, 3, 5, 7
@@ -195,11 +215,13 @@ class Matcher:
 
 
 # --------------------------------------------------------------------- 集計
-def is_excluded(customer, keywords):
-    return any(k in customer for k in keywords)
+def is_excluded(customer, site, cust_kw, site_kw):
+    """顧客名 or 現場名に除外キーワード(部分一致)が含まれれば True。"""
+    return (any(k in (customer or "") for k in cust_kw)
+            or any(k in (site or "") for k in site_kw))
 
 
-def compute_board(office, date, rows, roster, exclude, aliases):
+def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
     """1つの番割(office, date)の稼働率レポートを返す。
 
     rows:   [{customer, site, worker, badge}]
@@ -211,6 +233,7 @@ def compute_board(office, date, rows, roster, exclude, aliases):
     matcher = Matcher(home, subset, aliases)
 
     home_on, home_rev, home_ovh = set(), set(), set()
+    home_lent = set()                 # 宮崎タグ付き=他営業所へ貸出した自営業所社員
     home_name = {}                    # key -> 氏名(表示用)
     oth_on, oth_rev = set(), set()
     oth_office = {}                   # key -> 他営業所キー
@@ -222,10 +245,12 @@ def compute_board(office, date, rows, roster, exclude, aliases):
         badge = a.get("badge", "")
         kind, code = matcher.classify(worker, badge)
         key = code or worker
-        exc = is_excluded(cust, exclude)
+        exc = is_excluded(cust, site, cust_kw, site_kw)
         if kind == "home":
             home_on.add(key)
             home_name[key] = worker
+            if office_key(badge) == home and office_key(badge):
+                home_lent.add(key)    # 自営業所タグ付き=貸出
             (home_ovh if exc else home_rev).add(key)
             label = "自営業所"
         elif kind == "other":
@@ -259,7 +284,7 @@ def compute_board(office, date, rows, roster, exclude, aliases):
         "roster_size": roster_size,
         "denominator": roster_size, "present": present,
         "revenue": num, "overhead_only": ovh_only,
-        "idle": idle, "rate": rate,
+        "idle": idle, "rate": rate, "lent_out": len(home_lent),
         "overhead_names": sorted(home_name[k] for k in (home_ovh - home_rev)),
         "other_total": len(oth_on), "other_revenue": len(oth_rev),
         "other_by_office": dict(by_office),
@@ -268,7 +293,7 @@ def compute_board(office, date, rows, roster, exclude, aliases):
     }
 
 
-def render_board(r, exclude):
+def render_board(r):
     L = []
     L.append("=" * 66)
     L.append(f"作業員稼働率  {r['office']}  {r['date']}")
@@ -284,6 +309,9 @@ def render_board(r, exclude):
     L.append("-" * 66)
     L.append("【自営業所 内訳(分母=在籍)】")
     L.append(f"  外貨を産む現場  : {r['revenue']:>4} 名  ← 稼働(分子)")
+    if r.get("lent_out"):
+        L.append(f"    └ うち他営業所へ貸出 : {r['lent_out']:>4} 名 "
+                 f"(自営業所タグ。貸出も稼働として算入)")
     L.append(f"  管理費現場      : {r['overhead_only']:>4} 名  {r['overhead_names']}")
     L.append(f"  休み・待機      : {r['idle']:>4} 名  (在籍だが番割に名前なし)")
     L.append("")
@@ -375,8 +403,8 @@ def main():
                     help="社員名簿CSV(Shift-JIS)。営業所ごとに複数指定可。"
                          "フォルダを渡すと中の*.csvを全部読む")
     ap.add_argument("--inspect", help="workers_inspect.txt から計算(指定時は番割を読まない)")
-    ap.add_argument("--exclude", nargs="*", default=list(DEFAULT_EXCLUDE),
-                    help="外貨を産まない顧客キーワード(既定: 第一元商 宮崎興業)")
+    ap.add_argument("--exclude", nargs="*", default=None,
+                    help="外貨を産まない顧客キーワード(部分一致)。指定時は設定ファイルより優先")
     ap.add_argument("--out", default=str(HERE / "utilization_report.txt"))
     ap.add_argument("--csv", default=str(HERE / "utilization_detail.csv"))
     ap.add_argument("--history", default=str(HISTORY_PATH),
@@ -388,6 +416,11 @@ def main():
     if ALIASES_PATH.exists():
         raw = json.loads(ALIASES_PATH.read_text(encoding="utf-8"))
         aliases = {k: v for k, v in raw.items() if not k.startswith("_")}
+
+    settings = load_settings(SETTINGS_PATH)
+    cust_kw = args.exclude if args.exclude is not None else settings["exclude_customer_keywords"]
+    site_kw = settings["exclude_site_keywords"]
+    print(f"除外キーワード  顧客: {cust_kw}  現場: {site_kw}")
 
     if args.inspect:
         assignments = assignments_from_inspect(args.inspect)
@@ -401,9 +434,10 @@ def main():
 
     reports = []
     for (office, date), rows in sorted(boards.items()):
-        reports.append(compute_board(office, date, rows, roster, args.exclude, aliases))
+        reports.append(compute_board(office, date, rows, roster,
+                                     cust_kw, site_kw, aliases))
 
-    texts = [render_board(r, args.exclude) for r in reports]
+    texts = [render_board(r) for r in reports]
     out_text = "\n\n".join(texts)
     print()
     print(out_text)

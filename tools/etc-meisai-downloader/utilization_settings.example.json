@@ -1,0 +1,7 @@
+{
+  "_使い方": "このファイルを utilization_settings.json にコピーして編集する。外貨を産まない(管理費)現場の判定に使う。いずれも『部分一致』。先頭が _ のキーは無視される。",
+  "_exclude_customer_keywords": "顧客名にこの語が含まれたら管理費(分子から除外)。例: 第一元商 宮崎興業",
+  "exclude_customer_keywords": ["第一元商", "宮崎興業"],
+  "_exclude_site_keywords": "現場名にこの語が含まれたら管理費。例: 送迎 寮 清掃 事務 社内",
+  "exclude_site_keywords": []
+}

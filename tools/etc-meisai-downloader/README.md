@@ -139,12 +139,42 @@ ttkbootstrap が入っていない環境でも、標準の見た目で問題な�
 2. 名簿の置き方（どれか）:
    - **`roster` フォルダ**を同フォルダに作り、各営業所のCSVを入れる（中の `*.csv` を全部読む）← 5営業所はこれが楽
    - 1ファイルなら `roster.csv` として同フォルダに置く、または `utilization.bat` にドラッグ＆ドロップ
-3. Hksの番割予定表を開いて実行（**複数営業所ぶん開いておけば一度に全部集計**。全画面化は不要）
+3. Hksの番割予定表を開いて実行（**複数営業所・複数日付を何枚開いてもよい**。全画面化は不要）
 4. 出力:
    - `utilization_report.txt` … 営業所ごとの稼働率と内訳
    - `utilization_detail.csv` … 作業員ごとの判定明細（営業所・バッジ・区分付き。Excelで開ける）
    - `utilization_history.csv` … **日次履歴**（日付×営業所ごとに1行を追記。同じ日付・営業所は上書き）。
      Excelでピボット/折れ線にすれば日々の推移が見える
+
+### 日付・複数番割の扱い
+
+集計は **(営業所, 日付) ごとに完全に独立**。番割を何枚開いても、見出しの営業所と日付で
+仕分けて、それぞれ別の稼働率を出す。
+
+- 5営業所ぶんを開く → 5本の稼働率（各営業所の名簿で判定）
+- 同じ営業所で複数日付（今日・明日 等）を開く → **日付ごとに別々**に集計し、履歴も日付ごとに別行
+- 同じ(営業所,日付)を二重に開いていても、人は名簿コードで重複排除される
+
+### 貸出（他営業所へ）
+
+自営業所から他営業所へ貸し出した作業員は、自営業所の番割に**自営業所タグ付き**で出る。
+これは稼働（外貨）として算入したうえで、「**うち他営業所へ貸出 N名**」として内訳に表示する。
+（他営業所→自営業所の応援は逆に「他営業所応援」として別集計）
+
+### 例外（除外）キーワードの管理
+
+外貨を産まない（管理費）現場の条件は **`utilization_settings.json`** で管理する。
+`utilization_settings.example.json` をコピーして編集する。いずれも**部分一致**。
+
+```json
+{
+  "exclude_customer_keywords": ["第一元商", "宮崎興業"],
+  "exclude_site_keywords": ["送迎", "寮", "清掃"]
+}
+```
+
+- `exclude_customer_keywords` … 顧客名にこの語を含む現場を管理費（分子から除外）
+- `exclude_site_keywords` … 現場名にこの語を含む現場を管理費
 
 検証用に、番割を読まず `inspect_workers.py` の出力から再計算もできる:
 `python utilization.py --roster roster.csv --inspect workers_inspect.txt`
@@ -178,5 +208,7 @@ ttkbootstrap が入っていない環境でも、標準の見た目で問題な�
 | `utilization.py` | 作業員稼働率の集計（営業所ごと・日次履歴つき） |
 | `utilization.bat` | 稼働率集計の起動 |
 | `utilization_history.csv` | 日次の稼働率履歴（自動生成・追記） |
+| `utilization_settings.json` | 除外キーワード設定（`*.example.json` をコピーして編集） |
+| `name_aliases.json` | 外国人ニックネーム対照表（`*.example.json` をコピーして編集） |
 | `inspect_workers.py` / `inspect_workers.bat` | 番割の作業員・色・印の調査用 |
 | `name_aliases.example.json` | 外国人ニックネーム補正表のひな型 |
