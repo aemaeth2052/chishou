@@ -482,6 +482,66 @@ def assignments_from_inspect(path):
     return out
 
 
+def save_settings(settings, path=SETTINGS_PATH):
+    """除外キーワード設定を JSON に保存する。"""
+    data = {
+        "exclude_customer_keywords": list(settings.get("exclude_customer_keywords", [])),
+        "exclude_site_keywords": list(settings.get("exclude_site_keywords", [])),
+    }
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+
+
+def save_aliases(aliases, path=ALIASES_PATH):
+    """対照表(name_aliases) を JSON に保存する。既存のコメント(_ キー)は残す。"""
+    p = Path(path)
+    base = {}
+    if p.exists():
+        try:
+            base = {k: v for k, v in json.loads(p.read_text(encoding="utf-8")).items()
+                    if k.startswith("_")}
+        except Exception:
+            base = {}
+    base.update(aliases)
+    p.write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_outputs(reports, out_path=None, csv_path=None,
+                  history_path=HISTORY_PATH, review_path=REVIEW_PATH):
+    """レポート/明細/履歴/取りこぼしCSVを書き出す。GUI/CLI 共通。
+
+    Returns: (レポート本文, review一覧, 要確認数, 確認推奨数)
+    """
+    out_path = out_path or (HERE / "utilization_report.txt")
+    csv_path = csv_path or (HERE / "utilization_detail.csv")
+    out_text = "\n\n".join(render_board(r) for r in reports)
+    Path(out_path).write_text(out_text, encoding="utf-8")
+
+    with open(csv_path, "w", encoding="cp932", errors="replace", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["営業所", "日付", "作業員", "バッジ", "区分", "現場種別", "顧客", "現場"])
+        for r in reports:
+            for d in r["details"]:
+                w.writerow([d["office"], d["date"], d["worker"], d["badge"],
+                            d["kind"], d["field"], d["customer"], d["site"]])
+
+    append_history(history_path, reports)
+
+    review = collect_review(reports)
+    with open(review_path, "w", encoding="cp932", errors="replace", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["優先", "営業所", "日付", "氏名(対照表のキー)", "バッジ",
+                    "現在の判定", "推奨コード候補", "顧客", "現場", "対応のヒント"])
+        for x in review:
+            w.writerow([x["priority"], x["office"], x["date"], x["worker"], x["badge"],
+                        x["current"], x.get("suggest", ""),
+                        x["customer"], x["site"], x["hint"]])
+
+    n_check = sum(1 for x in review if x["priority"] == "要確認")
+    n_reco = sum(1 for x in review if x["priority"] == "確認推奨")
+    return out_text, review, n_check, n_reco
+
+
 def main():
     ap = argparse.ArgumentParser(description="作業員稼働率の集計(営業所ごと)")
     ap.add_argument("--roster", required=True, nargs="+",
@@ -507,35 +567,10 @@ def main():
     reports = analyze(args.roster, inspect_path=args.inspect,
                       cust_kw=cust_kw, site_kw=site_kw, aliases=aliases)
 
-    texts = [render_board(r) for r in reports]
-    out_text = "\n\n".join(texts)
+    out_text, review, n_check, n_reco = write_outputs(
+        reports, args.out, args.csv, args.history, args.review)
     print()
     print(out_text)
-    Path(args.out).write_text(out_text, encoding="utf-8")
-
-    with open(args.csv, "w", encoding="cp932", errors="replace", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["営業所", "日付", "作業員", "バッジ", "区分", "現場種別", "顧客", "現場"])
-        for r in reports:
-            for d in r["details"]:
-                w.writerow([d["office"], d["date"], d["worker"], d["badge"],
-                            d["kind"], d["field"], d["customer"], d["site"]])
-
-    append_history(args.history, reports)
-
-    # 取りこぼし候補(自社かもしれないのに対象外/名簿未照合)を別CSVに
-    review = collect_review(reports)
-    with open(args.review, "w", encoding="cp932", errors="replace", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["優先", "営業所", "日付", "氏名(対照表のキー)", "バッジ",
-                    "現在の判定", "推奨コード候補", "顧客", "現場", "対応のヒント"])
-        for x in review:
-            w.writerow([x["priority"], x["office"], x["date"], x["worker"], x["badge"],
-                        x["current"], x.get("suggest", ""),
-                        x["customer"], x["site"], x["hint"]])
-
-    n_check = sum(1 for x in review if x["priority"] == "要確認")
-    n_reco = sum(1 for x in review if x["priority"] == "確認推奨")
 
     print(f"\nレポート: {args.out}")
     print(f"明細CSV : {args.csv}")

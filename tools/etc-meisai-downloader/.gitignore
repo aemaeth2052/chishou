@@ -13,6 +13,7 @@ roster.csv
 roster/
 name_aliases.json
 utilization_settings.json
+utilization_app_config.json
 utilization_history.csv
 utilization_report.txt
 utilization_detail.csv
