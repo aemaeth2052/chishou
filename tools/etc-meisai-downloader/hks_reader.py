@@ -477,6 +477,66 @@ def build_vehicle_map(records):
     return m
 
 
+def read_all_assignments(log=print):
+    """番割の「全作業員」を返す。稼働率計測用。
+
+    read_windows / read_schedule は ETC 突合が目的のため車両が割り当たった
+    ブロックしか残さない。稼働率では車両の有無に関係なく全作業員が要るので、
+    こちらはフィルタせず作業員1人につき1行を返す。
+
+    Returns: [{office, date, customer, site, worker}]
+    """
+    metas = enumerate_windows()
+    if not metas:
+        raise RuntimeError(
+            "番割予定表ウィンドウが見つかりません。Hksで番割予定表を表示してください。"
+        )
+    rows = []
+    for m in metas:
+        win = m["win"]
+        office = m.get("office", "")
+        date_iso = m.get("date", "")
+        pane = None
+        for c in win.children():
+            try:
+                if c.element_info.control_type == "Pane":
+                    pane = c
+                    break
+            except Exception:
+                continue
+        if pane is None:
+            log(f"  {office or '営業所不明'}: カード領域(Pane)が見つからずスキップ")
+            continue
+        try:
+            root = _snap_cached(pane)
+        except Exception as e:
+            log(f"  高速読取に失敗、通常方式に切替: {e}")
+            root = _snap(pane)
+        before = len(rows)
+        current_customer = None
+        for child in root["children"]:
+            if child["ct"] == "Text":
+                t = child["text"].strip()
+                if t and t not in NON_CUSTOMER:
+                    current_customer = _clean_customer(t)
+                elif t in NON_CUSTOMER:
+                    current_customer = None
+            elif child["ct"] == "Custom" and current_customer:
+                rec = _parse_block(child, current_customer)
+                for wname in rec["workers"]:
+                    rows.append({
+                        "office": office,
+                        "date": date_iso,
+                        "customer": current_customer,
+                        "site": rec["site"],
+                        "worker": wname,
+                    })
+        log(f"  {office or '営業所不明'} {date_iso or '日付不明'}: "
+            f"{len(rows) - before} 名")
+    log(f"全作業員 読取完了: 合計 {len(rows)} 名")
+    return rows
+
+
 # ---------------------------------------------------------- 単体テスト用
 def _main():
     try:
