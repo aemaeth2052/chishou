@@ -168,6 +168,30 @@ def load_rosters(paths, active_only=True):
     return out
 
 
+def suggest_roster(name, subset, limit=3):
+    """番割の表示名(主に外国人カナ)に近い名簿社員を推測して候補文字列を返す。
+
+    名簿の氏名トークン/フリガナトークンと、表示名が前方一致または部分一致するものを拾う。
+    返り値は 'コード:氏名 / コード:氏名' 形式(無ければ空文字)。
+    """
+    n = _norm(name)
+    if len(n) < 2:
+        return ""
+    out, seen = [], set()
+    for e in subset:
+        toks = [_norm(t) for t in re.split(r"[　 ]+", e.name.strip())]
+        toks += [_norm(t) for t in e.furi.split()]
+        for t in toks:
+            if len(t) < 2:
+                continue
+            if t.startswith(n) or n.startswith(t) or n in t or t in n:
+                if e.code not in seen:
+                    seen.add(e.code)
+                    out.append(f"{e.code}:{e.name}")
+                break
+    return " / ".join(out[:limit])
+
+
 class Matcher:
     """ある営業所(home)について、番割の (表示名, バッジ) → 区分 を判定する。
 
@@ -281,7 +305,8 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
         if reason and worker not in review:
             review[worker] = {"priority": reason[0], "office": office, "date": date,
                               "worker": worker, "badge": badge, "current": reason[1],
-                              "customer": cust, "site": site, "hint": reason[2]}
+                              "customer": cust, "site": site, "hint": reason[2],
+                              "suggest": suggest_roster(worker, subset)}
 
     present = len(home_on)            # 番割に出ている自営業所社員(出勤)
     num = len(home_rev)               # うち外貨現場(=分子)
@@ -380,9 +405,52 @@ def append_history(path, reports):
 
 
 # ---------------------------------------------------- 番割の取得(2系統)
-def assignments_from_hks():
+def load_aliases(path=ALIASES_PATH):
+    """name_aliases.json を読む(先頭が _ のコメントキーは無視)。"""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
+            aliases=None, log=print):
+    """名簿と番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。"""
+    roster = load_rosters(roster_paths, active_only=True)
+    if aliases is None:
+        aliases = load_aliases()
+    if cust_kw is None or site_kw is None:
+        s = load_settings(SETTINGS_PATH)
+        cust_kw = s["exclude_customer_keywords"] if cust_kw is None else cust_kw
+        site_kw = s["exclude_site_keywords"] if site_kw is None else site_kw
+    if inspect_path:
+        assignments = assignments_from_inspect(inspect_path)
+    else:
+        assignments = assignments_from_hks(log=log)
+    boards = defaultdict(list)
+    for a in assignments:
+        boards[(a.get("office", ""), a.get("date", ""))].append(a)
+    reports = []
+    for (office, date), rows in sorted(boards.items()):
+        reports.append(compute_board(office, date, rows, roster,
+                                     cust_kw, site_kw, aliases))
+    return reports
+
+
+def collect_review(reports):
+    """全レポートの取りこぼし候補を優先度順にまとめて返す。"""
+    prio = {"要確認": 0, "確認推奨": 1}
+    review = []
+    for r in reports:
+        review.extend(r["review"])
+    review.sort(key=lambda x: (prio.get(x["priority"], 9), x["office"], x["worker"]))
+    return review
+
+
+def assignments_from_hks(log=print):
     import hks_reader as hr
-    return hr.read_all_assignments(log=print)
+    return hr.read_all_assignments(log=log)
 
 
 def assignments_from_inspect(path):
@@ -430,31 +498,14 @@ def main():
                     help="取りこぼし候補CSVの保存先")
     args = ap.parse_args()
 
-    roster = load_rosters(args.roster, active_only=True)
-    aliases = {}
-    if ALIASES_PATH.exists():
-        raw = json.loads(ALIASES_PATH.read_text(encoding="utf-8"))
-        aliases = {k: v for k, v in raw.items() if not k.startswith("_")}
-
+    aliases = load_aliases()
     settings = load_settings(SETTINGS_PATH)
     cust_kw = args.exclude if args.exclude is not None else settings["exclude_customer_keywords"]
     site_kw = settings["exclude_site_keywords"]
     print(f"除外キーワード  顧客: {cust_kw}  現場: {site_kw}")
 
-    if args.inspect:
-        assignments = assignments_from_inspect(args.inspect)
-    else:
-        assignments = assignments_from_hks()
-
-    # (営業所, 日付)ごとに分けて集計
-    boards = defaultdict(list)
-    for a in assignments:
-        boards[(a.get("office", ""), a.get("date", ""))].append(a)
-
-    reports = []
-    for (office, date), rows in sorted(boards.items()):
-        reports.append(compute_board(office, date, rows, roster,
-                                     cust_kw, site_kw, aliases))
+    reports = analyze(args.roster, inspect_path=args.inspect,
+                      cust_kw=cust_kw, site_kw=site_kw, aliases=aliases)
 
     texts = [render_board(r) for r in reports]
     out_text = "\n\n".join(texts)
@@ -473,18 +524,15 @@ def main():
     append_history(args.history, reports)
 
     # 取りこぼし候補(自社かもしれないのに対象外/名簿未照合)を別CSVに
-    prio = {"要確認": 0, "確認推奨": 1}
-    review = []
-    for r in reports:
-        review.extend(r["review"])
-    review.sort(key=lambda x: (prio.get(x["priority"], 9), x["office"], x["worker"]))
+    review = collect_review(reports)
     with open(args.review, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
         w.writerow(["優先", "営業所", "日付", "氏名(対照表のキー)", "バッジ",
-                    "現在の判定", "顧客", "現場", "対応のヒント"])
+                    "現在の判定", "推奨コード候補", "顧客", "現場", "対応のヒント"])
         for x in review:
             w.writerow([x["priority"], x["office"], x["date"], x["worker"], x["badge"],
-                        x["current"], x["customer"], x["site"], x["hint"]])
+                        x["current"], x.get("suggest", ""),
+                        x["customer"], x["site"], x["hint"]])
 
     n_check = sum(1 for x in review if x["priority"] == "要確認")
     n_reco = sum(1 for x in review if x["priority"] == "確認推奨")
