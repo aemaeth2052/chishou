@@ -15,6 +15,12 @@ name_aliases.json
 utilization_settings.json
 utilization_app_config.json
 utilization_history.csv
+
+# Google サービスアカウント鍵(資格情報。絶対にコミットしない)
+*service_account*.json
+*-credentials.json
+*.iam.gserviceaccount.com.json
+gcp-*.json
 utilization_report.txt
 utilization_detail.csv
 utilization_review.csv

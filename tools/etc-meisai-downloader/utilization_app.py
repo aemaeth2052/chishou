@@ -69,15 +69,18 @@ class App:
         self.tab_excl = ttk.Frame(nb)
         self.tab_alias = ttk.Frame(nb)
         self.tab_hist = ttk.Frame(nb)
+        self.tab_gs = ttk.Frame(nb)
         nb.add(self.tab_run, text="集計")
         nb.add(self.tab_excl, text="除外設定")
         nb.add(self.tab_alias, text="対照表")
         nb.add(self.tab_hist, text="履歴")
+        nb.add(self.tab_gs, text="Google連携")
 
         self._build_run()
         self._build_exclude()
         self._build_alias()
         self._build_history()
+        self._build_gsheet()
 
         self.root.after(120, self._poll)
 
@@ -169,6 +172,7 @@ class App:
         # 最新の対照表・除外設定を読み直して使う
         self.aliases = U.load_aliases()
         self.settings = U.load_settings(U.SETTINGS_PATH)
+        gs = self.cfg.get("gsheet", {})
 
         def work():
             try:
@@ -180,6 +184,15 @@ class App:
                     log=lambda s: self.q.put(("log", s)))
                 _, review, nchk, nreco = U.write_outputs(reports)
                 self.q.put(("done", (reports, review, nchk, nreco)))
+                if gs.get("enabled") and gs.get("sa_json") and gs.get("spreadsheet"):
+                    try:
+                        import sheets_sync
+                        sheets_sync.sync_history(
+                            reports, gs["sa_json"], gs["spreadsheet"],
+                            gs.get("worksheet", "稼働率履歴"),
+                            log=lambda s: self.q.put(("gslog", s)))
+                    except Exception as e:
+                        self.q.put(("gslog", f"Googleシート更新に失敗: {e}"))
             except Exception as e:
                 self.q.put(("error", str(e)))
 
@@ -191,6 +204,8 @@ class App:
                 kind, payload = self.q.get_nowait()
                 if kind == "log":
                     self._logmsg(payload)
+                elif kind == "gslog":
+                    self._gslog(payload)
                 elif kind == "error":
                     self._logmsg("エラー: " + payload)
                     messagebox.showerror("集計エラー", payload)
@@ -408,7 +423,88 @@ class App:
         for r in rows[1:]:
             self.tree_hist.insert("", "end", values=r)
 
+    # -------------------------------------------------------- Google連携タブ
+    def _build_gsheet(self):
+        f = self.tab_gs
+        g = self.cfg.get("gsheet", {})
+        self.gs_enabled = tk.BooleanVar(value=bool(g.get("enabled", False)))
+        self.gs_json = tk.StringVar(value=g.get("sa_json", ""))
+        self.gs_url = tk.StringVar(value=g.get("spreadsheet", ""))
+        self.gs_ws = tk.StringVar(value=g.get("worksheet", "稼働率履歴"))
 
+        ttk.Label(f, text="サービスアカウント方式で、集計のたびに(日付×営業所)を"
+                  "スプレッドシートへ上書き/追記します。").pack(anchor="w", padx=8, pady=6)
+
+        frm = ttk.Frame(f)
+        frm.pack(fill="x", padx=8, pady=4)
+        frm.columnconfigure(1, weight=1)
+        ttk.Label(frm, text="サービスアカウントJSON:").grid(row=0, column=0, sticky="e", pady=3)
+        ttk.Entry(frm, textvariable=self.gs_json).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(frm, text="参照", command=self._pick_json).grid(row=0, column=2)
+        ttk.Label(frm, text="スプレッドシートURL/ID:").grid(row=1, column=0, sticky="e", pady=3)
+        ttk.Entry(frm, textvariable=self.gs_url).grid(row=1, column=1, columnspan=2,
+                                                      sticky="ew", padx=4)
+        ttk.Label(frm, text="ワークシート名:").grid(row=2, column=0, sticky="e", pady=3)
+        ttk.Entry(frm, textvariable=self.gs_ws).grid(row=2, column=1, columnspan=2,
+                                                     sticky="ew", padx=4)
+
+        row = ttk.Frame(f)
+        row.pack(fill="x", padx=8, pady=8)
+        ttk.Checkbutton(row, text="集計時にスプレッドシートも更新する",
+                        variable=self.gs_enabled).pack(side="left")
+        ttk.Button(row, text="保存", command=self._save_gsheet).pack(side="right")
+        ttk.Button(row, text="接続テスト", command=self._test_gsheet).pack(side="right", padx=6)
+
+        self.gs_log = scrolledtext.ScrolledText(f, height=8)
+        self.gs_log.pack(fill="both", expand=True, padx=8, pady=6)
+        self.gs_log.insert("end",
+                           "事前準備:\n"
+                           " 1. Google Cloud でプロジェクト作成→Google Sheets APIを有効化\n"
+                           " 2. サービスアカウント作成→JSONキーをダウンロード\n"
+                           " 3. 対象シートを、そのアカウントのメール(...iam.gserviceaccount.com)に\n"
+                           "    『編集者』で共有\n"
+                           " 4. 上にJSONパスとシートURLを入れて『接続テスト』→『保存』\n")
+
+    def _pick_json(self):
+        p = filedialog.askopenfilename(title="サービスアカウントJSONを選択",
+                                       filetypes=[("JSON", "*.json"), ("すべて", "*.*")])
+        if p:
+            self.gs_json.set(p)
+
+    def _gs_dict(self):
+        return {"enabled": bool(self.gs_enabled.get()), "sa_json": self.gs_json.get().strip(),
+                "spreadsheet": self.gs_url.get().strip(), "worksheet": self.gs_ws.get().strip() or "稼働率履歴"}
+
+    def _save_gsheet(self):
+        self.cfg["gsheet"] = self._gs_dict()
+        save_app_config(self.cfg)
+        self._gslog("設定を保存しました。")
+
+    def _gslog(self, s):
+        self.gs_log.insert("end", s + "\n")
+        self.gs_log.see("end")
+
+    def _test_gsheet(self):
+        g = self._gs_dict()
+        if not g["sa_json"] or not g["spreadsheet"]:
+            messagebox.showwarning("未入力", "JSONパスとシートURLを入れてください。")
+            return
+        self._gslog("接続テスト中...")
+
+        def work():
+            try:
+                import sheets_sync
+                msg = sheets_sync.test_connection(g["sa_json"], g["spreadsheet"], g["worksheet"])
+                self.q.put(("gslog", msg))
+            except ImportError:
+                self.q.put(("gslog", "gspread 未インストール。setup を実行してください"
+                            "(pip install gspread)。"))
+            except Exception as e:
+                self.q.put(("gslog", f"接続失敗: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ------------------------------------------------------------- 起動
 def main():
     if HAS_TTKB:
         root = ttkb.Window(themename="cosmo")

@@ -145,6 +145,24 @@ ttkbootstrap が入っていない環境でも、標準の見た目で問題な�
 
 集計を押すと、レポート・明細・履歴・取りこぼしの各ファイルも自動で書き出される（CLIと同じ）。
 
+### Googleスプレッドシート連携（サービスアカウント方式）
+
+GUIの「Google連携」タブで設定すると、集計のたびに **(日付×営業所)** をスプレッドシートへ
+**上書き/追記**（同じ日付・営業所は上書き）する。列は履歴CSVと同じ。
+
+一度だけの準備:
+
+1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成
+2. 「APIとサービス」→ **Google Sheets API** を有効化
+3. **サービスアカウント**を作成 → 鍵を **JSON** でダウンロード
+4. 対象スプレッドシートを、そのサービスアカウントのメール
+   （`xxxx@xxxx.iam.gserviceaccount.com`）に **編集者** で共有
+5. アプリの「Google連携」タブに **JSONのパス** と **シートURL** を入れて「接続テスト」→「保存」、
+   「集計時にスプレッドシートも更新する」にチェック
+
+以降は「番割から集計する」を押すたびに、ローカルCSVと同時にシートも更新される。
+JSONキーは資格情報なので、PC内で安全に保管すること（パスのみ設定に保存される）。
+
 ### CLIで使う
 
 1. Hksから**社員名簿をCSVで書き出す**（コード,名称,フリガナ,営業所,区分,備考,…,在,… の形式。Shift-JIS）。
@@ -222,7 +240,8 @@ ttkbootstrap が入っていない環境でも、標準の見た目で問題な�
 | `config.json` | 設定の保存先（自動生成。Git管理外） |
 | `logs/` | エラー時の画面記録（自動生成。Git管理外） |
 | `hks_reader.py` | 番割予定表の読み取り（UI Automation）。`read_all_assignments` で全作業員 |
-| `utilization_app.py` / `utilization_app.bat` | 稼働率GUI（集計・除外設定・対照表・履歴） |
+| `utilization_app.py` / `utilization_app.bat` | 稼働率GUI（集計・除外設定・対照表・履歴・Google連携） |
+| `sheets_sync.py` | 稼働率履歴をGoogleスプレッドシートへupsert（gspread） |
 | `utilization.py` | 作業員稼働率の集計ロジック（CLIでも単体実行可） |
 | `utilization.bat` | 稼働率集計の起動（CLI） |
 | `utilization_history.csv` | 日次の稼働率履歴（自動生成・追記） |

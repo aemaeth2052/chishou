@@ -11,8 +11,8 @@ if not defined PYCMD (
     exit /b 1
 )
 
-rem pywinauto: required to read the Hks schedule. ttkbootstrap: optional theme.
-%PYCMD% -m pip install pywinauto ttkbootstrap >nul 2>&1
+rem pywinauto: read the Hks schedule. ttkbootstrap: theme. gspread: Google Sheets sync.
+%PYCMD% -m pip install pywinauto ttkbootstrap gspread >nul 2>&1
 
 %PYCMD% utilization_app.py
 if errorlevel 1 pause
