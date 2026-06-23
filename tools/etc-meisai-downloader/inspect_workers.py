@@ -136,14 +136,24 @@ def cluster_key(c):
     return tuple((v // 24) * 24 for v in c)
 
 
+def bg_color(sampler, rect):
+    """矩形の最頻色(=氏名セルの背景色)を返す。
+
+    自営業所/他営業所/応援 は氏名の背景色で決まる、とのこと。氏名ノードの矩形は
+    文字グリフに沿った狭い範囲だが、グリフの隙間・周囲はセル背景色なので、
+    最頻色を取れば背景色になる。
+    """
+    _, bg = text_color(sampler, rect)
+    return bg
+
+
 # ------------------------------------------------------------- ブロック→作業員
 def worker_rects(block):
-    """1ブロックから (整形名, 生テキスト, 矩形) のリストを返す。
+    """1ブロックから (整形名, バッジ等の前置きテキスト, 氏名矩形) のリストを返す。
 
-    hks_reader._parse_block と同じ「右側 Custom = 作業員」判定を使うが、
-    色サンプリング用に矩形を、印(応援/外注のラベル)確認用に生テキストを併せて返す。
-    ※ 応援/外注は「名前に印が付く」とのことなので、_clean_worker_name で
-       消える前の生テキストを必ず残す。
+    hks_reader._parse_block と同じ「右側 Custom = 作業員」判定を使う。
+    氏名セル内の末尾テキスト=氏名、それより前=営業所バッジ(若/蘇/八/都 等)や
+    印として併せて返す。背景色サンプリング用に氏名矩形も返す。
     """
     fields = hr._fields_of(block)
     bl, _, br, _ = block["rect"]
@@ -159,10 +169,10 @@ def worker_rects(block):
         if not texts:
             continue
         last = texts[-1]  # 作業員名は末尾テキスト
-        raw = last["text"].strip()
-        name = hr._clean_worker_name(raw)
+        name = hr._clean_worker_name(last["text"].strip())
+        badges = " ".join(t["text"].strip() for t in texts[:-1])  # 前置き(バッジ/印)
         if name:
-            out.append((name, raw, last["rect"]))
+            out.append((name, badges, last["rect"]))
     return out
 
 
@@ -179,15 +189,19 @@ def main():
 
     sampler = Sampler()
     lines = []
-    color_members = defaultdict(list)  # クラスタ色 -> [(名前, 現場, hex)]
+    bg_members = defaultdict(list)  # 背景色クラスタ -> [(名前, バッジ, 現場, hex)]
+    got = miss = 0  # 背景色を取得できた/できなかった数
 
     def w(s=""):
         print(s)
         lines.append(str(s))
 
     w("=" * 78)
-    w(f"番割 作業員インスペクタ  {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    w(f"番割 作業員インスペクタ(氏名の背景色＋営業所バッジ)"
+      f"  {time.strftime('%Y-%m-%d %H:%M:%S')}")
     w(f"色取得方式: {sampler.mode}  /  予定表 {len(metas)} 画面")
+    w("※ 自営業所/他営業所/応援 は氏名の背景色で決まる。背景色が画面外で取れない"
+      "行は ----- になるので、番割は『自動サイズ/最大化』で全部表示して実行すること。")
     w("=" * 78)
 
     total_workers = 0
@@ -218,8 +232,7 @@ def main():
         w("#" * 78)
         w(f"# {office}  {date_iso}")
         w("#" * 78)
-        w(f"{'顧客':<16}{'現場':<20}{'整形名':<10}{'生テキスト(印確認)':<18}"
-          f"{'文字色':<9}車両")
+        w(f"{'顧客':<16}{'現場':<18}{'氏名':<9}{'バッジ':<8}{'背景色':<9}車両")
         w("-" * 78)
 
         current_customer = None
@@ -234,26 +247,31 @@ def main():
                 rec = hr._parse_block(child, current_customer)
                 site = rec["site"]
                 has_vehicle = "○" if rec["vehicle_no"] else "×"
-                for name, raw, rect in worker_rects(child):
+                for name, badges, rect in worker_rects(child):
                     total_workers += 1
-                    tc, bg = text_color(sampler, rect)
-                    raw_disp = raw if raw != name else ""  # 印があるときだけ表示
-                    w(f"{current_customer[:14]:<16}{site[:18]:<20}"
-                      f"{name[:8]:<10}{raw_disp[:16]:<18}"
-                      f"{hexc(tc):<9}{has_vehicle}")
-                    if tc is not None:
-                        color_members[cluster_key(tc)].append(
-                            (name, f"{current_customer}:{site}", hexc(tc))
+                    bg = bg_color(sampler, rect)
+                    if bg is not None:
+                        got += 1
+                    else:
+                        miss += 1
+                    w(f"{current_customer[:14]:<16}{site[:16]:<18}"
+                      f"{name[:7]:<9}{badges[:6]:<8}{hexc(bg):<9}{has_vehicle}")
+                    if bg is not None:
+                        bg_members[cluster_key(bg)].append(
+                            (name, badges, f"{current_customer}:{site}", hexc(bg))
                         )
 
     w("")
     w("=" * 78)
-    w(f"作業員 総数(のべ): {total_workers} 人")
+    w(f"作業員 総数(のべ): {total_workers} 人  "
+      f"(背景色 取得 {got} / 取得不能 {miss})")
+    if miss:
+        w("※ 取得不能が多い場合は番割を最大化/自動サイズで全表示して再実行してください。")
     w("=" * 78)
 
     OUT.write_text("\n".join(lines), encoding="utf-8")
 
-    # --------- 文字色クラスタの集計(外注/応援が色で分かれるかの判定材料)
+    # --------- 背景色クラスタの集計(自営業所/他営業所/応援 の判別材料)
     clines = []
 
     def cw(s=""):
@@ -261,21 +279,24 @@ def main():
         clines.append(str(s))
 
     cw("=" * 78)
-    cw("検出された文字色クラスタ(人数の多い順)")
-    cw("外注/応援が色で分かれているなら、ここに別クラスタとして出るはず。")
+    cw("氏名の背景色クラスタ(人数の多い順)")
+    cw("自営業所/他営業所/応援 はこの色で分かれるはず。各色が何を指すか教えてください。")
+    cw("(バッジ 若/蘇/八/都 等が併記されていれば、色と営業所の対応の手がかりになる)")
     cw("=" * 78)
-    for key in sorted(color_members, key=lambda k: -len(color_members[k])):
-        members = color_members[key]
-        sample_hex = members[0][2]
-        names = "、".join(n for n, _, _ in members[:8])
+    for key in sorted(bg_members, key=lambda k: -len(bg_members[k])):
+        members = bg_members[key]
+        sample_hex = members[0][3]
+        badge_set = sorted({b for _, b, _, _ in members if b})
+        names = "、".join(n for n, _, _, _ in members[:8])
         cw("")
-        cw(f"■ 代表色 {sample_hex}  ({len(members)} 人)")
+        cw(f"■ 背景色 {sample_hex}  ({len(members)} 人)"
+           f"{'  バッジ: ' + ' '.join(badge_set) if badge_set else ''}")
         cw(f"   例: {names}")
     COLORS.write_text("\n".join(clines), encoding="utf-8")
 
     print()
     print(f"一覧:        {OUT}")
-    print(f"色クラスタ:  {COLORS}")
+    print(f"背景色クラスタ: {COLORS}")
     print("この2ファイルを開発者(Claude)に共有してください。")
 
 
