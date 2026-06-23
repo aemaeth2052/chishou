@@ -31,7 +31,8 @@ if errorlevel 1 (
 
 echo.
 echo --- IMPORTANT ---
-echo Make sure the Hks schedule list is visible on screen. Then press any key.
+echo Just open the Hks schedule window. No need to maximize or full-screen it
+echo (names and office badges are read as UIA text, not from pixels). Press any key.
 pause
 
 %PYCMD% utilization.py --roster "%ROSTER%"
