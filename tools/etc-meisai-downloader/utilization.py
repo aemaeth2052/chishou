@@ -15,16 +15,16 @@
   外貨を産む現場 = 顧客名に除外キーワード(既定: 第一元商 / 宮崎興業)を含まない現場。
   管理費(送迎応援・寮清掃など)は分子から外す。
 
-  分母 = 在籍 − 事務所スタッフ等で番割に出ない人
-  分子 = 外貨を産む現場に出た自営業所社員
+  分母 = 番割に出ている自営業所社員(出勤者)
+  分子 = そのうち外貨を産む現場に出た人
   稼働率 = 分子 ÷ 分母
 
+  ・名簿(CSV)にいても番割に名前がなければ分母に入れない(休み・待機・事務等は分母外)。
   ・自社タグ(自営業所バッジ)が付けば名簿に無くても無条件で自社として計上する
     (同時に確認推奨にも出し、コードを当てれば名簿照合済みになる)。
-  ・休み・待機 = 現場作業員で番割に名前なし(在籍に含むので分母に算入)。
-  ・事務所スタッフ等 = 事務・ダミー登録など。番割に出なければ分母から除く。
-                     名簿に判別列が無いので settings の non_field_staff(コード/氏名)で指定。
-  ・分母は在籍を超えない(在籍基準)。
+  ・休み・待機/事務等は分母外だが、参考値として併記する。
+  ・事務所スタッフ指定(settings の non_field_staff)は残すが、番割不在=分母外の
+    今の規則では事務スタッフも番割に出なければ自動で分母から外れる。
   他営業所応援は「借りた人工」として別集計。集計対象外はカウントしない。
 
 名簿CSVについて:
@@ -321,26 +321,20 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
                               "customer": cust, "site": site, "hint": reason[2],
                               "suggest": suggest_roster(worker, subset)}
 
-    present = len(home_on)            # 番割に出ている自営業所社員(出勤)
+    present = len(home_on)            # 番割に出ている自営業所社員(出勤=分母)
     num = len(home_rev)               # うち外貨現場(=分子)
     ovh_only = len(home_ovh - home_rev)
-    roster_size = len(subset)         # 在籍(名簿の在籍社員数)
+    roster_size = len(subset)         # 在籍(名簿の在籍社員数。参考)
 
-    # 番割に出ていない在籍者のうち、事務所スタッフ等は分母から除く。
-    # 分母 = 在籍 − (事務所スタッフ等で番割に名前がない人)。
-    # ※自社タグ等で名簿未照合の出勤者がいても分母は在籍を超えない(在籍基準)。
+    # 分母 = 番割に出ている自社のみ。名簿にいても番割に名前がなければ分母に入れない。
+    # (休み・待機・事務所スタッフ等は分母から外れる)
     def _is_staff(e):
         return e.code in staff or _norm(e.name) in staff
-    absent_staff = 0
-    for e in subset:
-        if e.code in home_on:
-            continue                  # 出勤(名簿一致)
-        if _is_staff(e):
-            absent_staff += 1         # 事務所スタッフで番割に無し → 分母から除外
-    # 休み・待機(現場作業員で番割に名前なし)= 在籍 − 出勤(名簿一致) − 事務除外
     roster_on = sum(1 for e in subset if e.code in home_on)
-    idle = roster_size - roster_on - absent_staff
-    denominator = roster_size - absent_staff
+    absent_staff = sum(1 for e in subset
+                       if e.code not in home_on and _is_staff(e))
+    idle = roster_size - roster_on - absent_staff  # 休み・待機(現場作業員で不在。参考)
+    denominator = present
     rate = (num / denominator) if denominator else 0.0
 
     by_office = defaultdict(int)
@@ -374,22 +368,22 @@ def render_board(r):
                  "稼働率は不正確です(その営業所の名簿CSVを渡してください)。")
         L.append("-" * 66)
     rate = r["rate"] * 100
-    L.append(f"★ 稼働率 = 外貨現場 {r['revenue']} ÷ 分母 {r['denominator']} "
+    L.append(f"★ 稼働率 = 外貨現場 {r['revenue']} ÷ 分母(出勤) {r['denominator']} "
              f"= {rate:.1f}%")
-    L.append(f"   (分母 = 在籍 {r['roster_size']} − 事務等で番割不在 "
-             f"{r.get('staff_excluded', 0)})")
+    L.append(f"   (分母 = 番割に出ている自社のみ。名簿在籍 {r['roster_size']} 名。"
+             f"番割不在の在籍者は分母に入れない)")
     L.append("-" * 66)
     L.append("【自営業所 内訳】")
-    L.append(f"  出勤(番割に名前): {r['present']:>4} 名")
+    L.append(f"  出勤(=分母)     : {r['present']:>4} 名")
     L.append(f"  外貨を産む現場  : {r['revenue']:>4} 名  ← 稼働(分子)")
     if r.get("lent_out"):
         L.append(f"    └ うち他営業所へ貸出 : {r['lent_out']:>4} 名 "
                  f"(自営業所タグ。貸出も稼働として算入)")
     L.append(f"  管理費現場      : {r['overhead_only']:>4} 名  {r['overhead_names']}")
-    L.append(f"  休み・待機      : {r['idle']:>4} 名  (現場作業員で番割に名前なし)")
+    L.append(f"  (参考)休み・待機: {r['idle']:>4} 名  (現場作業員で番割に名前なし。分母外)")
     if r.get("staff_excluded"):
-        L.append(f"  事務等(分母外)  : {r['staff_excluded']:>4} 名  "
-                 f"(番割に出ないので分母から除外)")
+        L.append(f"  (参考)事務等   : {r['staff_excluded']:>4} 名  "
+                 f"(番割に名前なし。分母外)")
     L.append("")
     L.append("【他営業所からの応援(借りた人工)・別集計】")
     L.append(f"  実人数          : {r['other_total']:>4} 名  "
@@ -405,8 +399,8 @@ def render_board(r):
     return "\n".join(L)
 
 
-HISTORY_HEADER = ["日付", "営業所", "在籍", "分母", "出勤", "外貨(分子)",
-                  "管理費", "休み待機", "事務等除外", "稼働率%",
+HISTORY_HEADER = ["日付", "営業所", "在籍", "出勤(分母)", "外貨(分子)",
+                  "管理費", "休み待機(参考)", "稼働率%",
                   "他営業所応援", "対象外"]
 
 
@@ -429,10 +423,9 @@ def append_history(path, reports):
             continue  # 同じ日付・営業所の古い行は捨てて入れ替え
         keep.append(row)
     for r in reports:
-        keep.append([r["date"], r["office"], r["roster_size"], r["denominator"],
-                     r["present"], r["revenue"], r["overhead_only"], r["idle"],
-                     r.get("staff_excluded", 0), f"{r['rate'] * 100:.1f}",
-                     r["other_total"], r["ignored"]])
+        keep.append([r["date"], r["office"], r["roster_size"], r["present"],
+                     r["revenue"], r["overhead_only"], r["idle"],
+                     f"{r['rate'] * 100:.1f}", r["other_total"], r["ignored"]])
     keep.sort(key=lambda x: (str(x[0]), str(x[1])))
     with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
