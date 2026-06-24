@@ -109,12 +109,12 @@ class App:
         ttk.Button(run, text="出力フォルダを開く",
                    command=self._open_folder).pack(side="right")
 
-        cols = ("営業所", "日付", "リスト", "在籍(分母)", "外貨", "休み", "待機",
+        cols = ("営業所", "日付", "リスト", "在籍(分母)", "外貨", "休み・待機",
                 "稼働率%", "貸出", "他営業所応援", "対象外")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=10)
         for c in cols:
             self.tree.heading(c, text=c)
-            w = 150 if c == "営業所" else (70 if c in ("日付", "在籍(分母)") else 60)
+            w = 150 if c == "営業所" else (70 if c in ("日付", "在籍(分母)", "休み・待機") else 60)
             self.tree.column(c, width=w, anchor="center")
         self.tree.column("営業所", anchor="w")
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
@@ -300,7 +300,7 @@ class App:
         for r in reports:
             self.tree.insert("", "end", values=(
                 r["office"], r["date"], r["roster_size"], r["present"],
-                r["revenue"], r["standby_yasumi"], r["standby_taiki"],
+                r["revenue"], r["standby"],
                 f"{r['rate'] * 100:.1f}",
                 r["lent_out"], r["other_total"], r["ignored"]))
         self.last_review = review
