@@ -83,6 +83,23 @@ def _clean_customer(text: str) -> str:
     return _normalize_company_spacing(s)
 
 
+# 待機/休み/留守 の枠ヘッダ判定。NON_CUSTOMER の厳密一致だと、先頭装飾(●★)や
+# 末尾の人数表記「待機(5)」が付くと取りこぼすので、装飾を落としてから先頭キーワードで
+# 判定する(顧客名の誤検出を避けるため、キーワード+任意の括弧書きだけを許す)。
+_STANDBY_RE = re.compile(r"^(待機|休み/留守|休み|留守)\s*(?:[(（][^)）]*[)）])?\s*$")
+
+
+def standby_status(text: str) -> str:
+    """ヘッダ文字列が待機/休み/留守の枠なら "待機"/"休み" を返す。通常顧客は ""。"""
+    s = _LEAD_BRACKET_RE.sub("", text.strip())
+    s = _strip_lead_marks(s)
+    m = _STANDBY_RE.match(s)
+    if not m:
+        return ""
+    return "待機" if "待機" in m.group(1) else "休み"
+
+
+
 def find_schedule_windows():
     """番割予定表ウィンドウを全て返す (営業所ごとに複数開いている場合に対応)"""
     from pywinauto import Desktop
@@ -499,12 +516,17 @@ def build_vehicle_map(records):
     return m
 
 
-def worker_badges(block):
+def worker_badges(block, include_left=False):
     """1ブロックから (作業員名, 営業所バッジ) のリストを返す。
 
     番割では作業員の所属営業所が氏名の前のバッジ(蘇我/若松/八幡/都賀/加曽利/宮崎 等)
     で示される。_parse_block の workers はバッジを落とすので、稼働率の営業所判定用に
     ここでバッジ込みで取り出す。氏名セル内の末尾テキスト=氏名、それより前=バッジ。
+
+    通常ブロックは「左=車両/フラグ、右=作業員」なので右半分(mid_x より右)だけを見る。
+    include_left=True にすると左右の区別をやめ、車両/フラグ/ETC/交通手段でないセルを
+    すべて氏名候補にする。待機/休み枠は車両欄が無く氏名だけが並ぶため、右半分だけ見ると
+    取りこぼして 0 人になってしまう。そこで待機/休み枠は include_left=True で全員拾う。
     """
     fields = _fields_of(block)
     bl, _, br, _ = block["rect"]
@@ -513,12 +535,19 @@ def worker_badges(block):
     for f in fields:
         if f["ct"] != "Custom":
             continue
-        cx = (f["rect"][0] + f["rect"][2]) / 2
-        if cx <= mid_x:
-            continue  # 左側は車両・フラグ
         texts = [c["text"].strip() for c in f["children"] if c["text"].strip()]
         if not texts:
             continue
+        cx = (f["rect"][0] + f["rect"][2]) / 2
+        if not include_left and cx <= mid_x:
+            continue  # 通常ブロックの左側は車両・フラグ
+        if include_left:
+            joined = "".join(texts)
+            # 待機/休み枠で氏名でないセル(車両・フラグ・ETC・交通手段)は除外
+            if (is_vehicle(joined) or joined.startswith("ETC")
+                    or (joined and all(c in FLAG_CHARS for c in joined))
+                    or joined in TRANSPORTS):
+                continue
         name = _clean_worker_name(texts[-1])
         badge = " ".join(texts[:-1]).strip()
         if name:
@@ -573,6 +602,7 @@ def read_all_assignments(select=None, log=print):
             log(f"  高速読取に失敗、通常方式に切替: {e}")
             root = _snap(pane)
         before = len(rows)
+        standby_count = 0
         current_customer = None
         current_status = ""       # "待機"/"休み" 等の枠。通常現場は ""
         for child in root["children"]:
@@ -580,16 +610,21 @@ def read_all_assignments(select=None, log=print):
                 t = child["text"].strip()
                 if not t:
                     continue
-                if t in NON_CUSTOMER:
+                st = standby_status(t)
+                if st:
                     # 待機・休み・留守 の枠。ここに割り当てられた人も読み取る。
                     current_customer = t
-                    current_status = "待機" if "待機" in t else "休み"
+                    current_status = st
                 else:
                     current_customer = _clean_customer(t)
                     current_status = ""
             elif child["ct"] == "Custom" and current_customer:
                 rec = _parse_block(child, current_customer)
-                for wname, badge in worker_badges(child):
+                # 待機/休み枠は車両欄が無く氏名だけ並ぶので、左右を問わず全員拾う
+                workers = worker_badges(child, include_left=bool(current_status))
+                if current_status:
+                    standby_count += len(workers)
+                for wname, badge in workers:
                     rows.append({
                         "office": office,
                         "date": date_iso,
@@ -600,7 +635,7 @@ def read_all_assignments(select=None, log=print):
                         "status": current_status,
                     })
         log(f"  {office or '営業所不明'} {date_iso or '日付不明'}: "
-            f"{len(rows) - before} 名")
+            f"{len(rows) - before} 名 (うち待機/休み {standby_count} 名)")
     log(f"全作業員 読取完了: 合計 {len(rows)} 名")
     return rows
 

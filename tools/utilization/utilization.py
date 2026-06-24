@@ -286,6 +286,11 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
         status = a.get("status", "")
         is_standby = bool(status) or cust in STANDBY_LABELS
         kind, code = matcher.classify(worker, badge)
+        if is_standby and kind == "ignore":
+            # 待機/休み枠はこの営業所の番割に載っている=自前の要員。バッジ無し&名簿
+            # 未照合(ignore は必ずバッジ無し)でも、この営業所の自社として分母に算入する。
+            # code は None のままなので review(確認推奨)に出して名簿照合を促す。
+            kind = "home"
         key = code or worker
         exc = is_excluded(cust, site, cust_kw, site_kw)
         if kind == "home":
