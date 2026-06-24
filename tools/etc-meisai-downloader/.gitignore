@@ -1,0 +1,14 @@
+.venv/
+config.json
+logs/
+__pycache__/
+*.pdf
+build/
+dist/
+*.zip
+*.spec.bak
+
+# Hks番割の調査出力(自動生成)
+hks_records.txt
+inspect_result.txt
+hks_tree.txt
