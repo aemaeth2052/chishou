@@ -272,6 +272,8 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
 
     home_on, home_rev, home_ovh = set(), set(), set()
     home_standby = set()              # 待機・休み枠に割り当てられた自営業所社員(分母内)
+    home_taiki = set()                # うち「待機」枠
+    home_yasumi = set()               # うち「休み/留守」枠
     home_lent = set()                 # 宮崎タグ付き=他営業所へ貸出した自営業所社員
     home_name = {}                    # key -> 氏名(表示用)
     oth_on, oth_rev = set(), set()
@@ -300,6 +302,10 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
             home_name[key] = worker
             if is_standby:
                 home_standby.add(key)  # 待機/休み枠 → 分母に入れるが外貨/管理費には入れない
+                if status == "待機" or (not status and "待機" in (cust or "")):
+                    home_taiki.add(key)
+                else:
+                    home_yasumi.add(key)  # 休み/留守
                 label = "自営業所(待機/休み)"
             else:
                 if office_key(badge) == home and office_key(badge):
@@ -341,6 +347,8 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
     num = len(home_rev)              # 外貨現場(=分子)
     ovh_only = len(home_ovh - home_rev)
     standby = len(home_standby)      # 待機/休み枠(分母内・非稼働)
+    standby_taiki = len(home_taiki)  # うち待機
+    standby_yasumi = len(home_yasumi)  # うち休み/留守
     roster_size = len(subset)        # 在籍(名簿の在籍社員数。参考)
     roster_on = sum(1 for e in subset if e.code in home_on)
     absent = roster_size - roster_on  # 名簿在籍だが番割に名前なし(分母外・参考)
@@ -357,7 +365,8 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
         "roster_size": roster_size,
         "denominator": denominator, "present": present,
         "revenue": num, "overhead_only": ovh_only,
-        "standby": standby, "absent": absent,
+        "standby": standby, "standby_taiki": standby_taiki,
+        "standby_yasumi": standby_yasumi, "absent": absent,
         "rate": rate, "lent_out": len(home_lent),
         "overhead_names": sorted(home_name[k] for k in (home_ovh - home_rev)),
         "other_total": len(oth_on), "other_revenue": len(oth_rev),
