@@ -116,6 +116,9 @@ python utilization.py --roster roster --inspect workers_inspect.txt   # 検証(�
 
 `inspect_workers.bat` … 番割の作業員・氏名背景色・営業所バッジをダンプ（区分判定の確認用）。
 
+`inspect_standby.bat` … 「待機」「休み」枠の画面構造（見出し・ブロックの入れ子・氏名セル位置）を
+`standby_dump.txt` にダンプ（待機/休みが分母に拾えないときの調査用）。
+
 ## ファイル構成
 
 | ファイル | 役割 |
