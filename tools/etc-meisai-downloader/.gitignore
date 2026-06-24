@@ -8,24 +8,7 @@ dist/
 *.zip
 *.spec.bak
 
-# 稼働率ツールのユーザーデータ・生成物(自社固有・Git管理外)
-roster.csv
-roster/
-name_aliases.json
-utilization_settings.json
-utilization_app_config.json
-utilization_history.csv
-
-# Google サービスアカウント鍵(資格情報。絶対にコミットしない)
-*service_account*.json
-*-credentials.json
-*.iam.gserviceaccount.com.json
-gcp-*.json
-utilization_report.txt
-utilization_detail.csv
-utilization_review.csv
-workers_inspect.txt
-workers_colors.txt
+# Hks番割の調査出力(自動生成)
 hks_records.txt
 inspect_result.txt
 hks_tree.txt

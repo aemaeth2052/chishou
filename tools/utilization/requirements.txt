@@ -1,0 +1,4 @@
+pywinauto
+ttkbootstrap
+gspread
+Pillow
