@@ -516,17 +516,15 @@ def build_vehicle_map(records):
     return m
 
 
-def worker_badges(block, include_left=False):
+def worker_badges(block):
     """1ブロックから (作業員名, 営業所バッジ) のリストを返す。
 
     番割では作業員の所属営業所が氏名の前のバッジ(蘇我/若松/八幡/都賀/加曽利/宮崎 等)
     で示される。_parse_block の workers はバッジを落とすので、稼働率の営業所判定用に
     ここでバッジ込みで取り出す。氏名セル内の末尾テキスト=氏名、それより前=バッジ。
 
-    通常ブロックは「左=車両/フラグ、右=作業員」なので右半分(mid_x より右)だけを見る。
-    include_left=True にすると左右の区別をやめ、車両/フラグ/ETC/交通手段でないセルを
-    すべて氏名候補にする。待機/休み枠は車両欄が無く氏名だけが並ぶため、右半分だけ見ると
-    取りこぼして 0 人になってしまう。そこで待機/休み枠は include_left=True で全員拾う。
+    通常現場のブロックは「左=車両/フラグ、右=作業員」なので右半分(mid_x より右)の
+    入れ子 Custom セルだけを見る。待機/休み枠は構造が異なる(standby_workers 参照)。
     """
     fields = _fields_of(block)
     bl, _, br, _ = block["rect"]
@@ -535,23 +533,45 @@ def worker_badges(block, include_left=False):
     for f in fields:
         if f["ct"] != "Custom":
             continue
+        cx = (f["rect"][0] + f["rect"][2]) / 2
+        if cx <= mid_x:
+            continue  # 左側は車両・フラグ
         texts = [c["text"].strip() for c in f["children"] if c["text"].strip()]
         if not texts:
             continue
-        cx = (f["rect"][0] + f["rect"][2]) / 2
-        if not include_left and cx <= mid_x:
-            continue  # 通常ブロックの左側は車両・フラグ
-        if include_left:
-            joined = "".join(texts)
-            # 待機/休み枠で氏名でないセル(車両・フラグ・ETC・交通手段)は除外
-            if (is_vehicle(joined) or joined.startswith("ETC")
-                    or (joined and all(c in FLAG_CHARS for c in joined))
-                    or joined in TRANSPORTS):
-                continue
         name = _clean_worker_name(texts[-1])
         badge = " ".join(texts[:-1]).strip()
         if name:
             out.append((name, badge))
+    return out
+
+
+def standby_workers(block):
+    """待機/休み枠のブロックから (氏名, バッジ) のリストを返す。
+
+    待機/休み枠のブロックは通常現場と構造が違い、氏名が入れ子の Custom セルではなく
+    ブロック直下の Text に入っている(実ダンプ例: [Text(''), Text('柿木久男')])。
+    そのため worker_badges(右側 Custom セル=作業員)では 0 人になってしまう。
+    ここではブロック直下の Text を氏名として拾い、念のため入れ子 Custom セルにも
+    氏名があれば併せて拾う。末尾の非空テキストを氏名、それ以前を営業所バッジとみなす。
+    """
+    fields = _fields_of(block)
+    out = []
+    direct = [f["text"].strip() for f in fields
+              if f["ct"] == "Text" and f["text"].strip()]
+    if direct:
+        name = _clean_worker_name(direct[-1])
+        if name:
+            out.append((name, " ".join(direct[:-1]).strip()))
+    for f in fields:
+        if f["ct"] != "Custom":
+            continue
+        texts = [c["text"].strip() for c in f["children"] if c["text"].strip()]
+        if not texts:
+            continue
+        name = _clean_worker_name(texts[-1])
+        if name:
+            out.append((name, " ".join(texts[:-1]).strip()))
     return out
 
 
@@ -605,6 +625,7 @@ def read_all_assignments(select=None, log=print):
         standby_count = 0
         current_customer = None
         current_status = ""       # "待機"/"休み" 等の枠。通常現場は ""
+        standby_cols = []         # [(中心x, status, 見出し)] 待機/休み列の見出し位置
         for child in root["children"]:
             if child["ct"] == "Text":
                 t = child["text"].strip()
@@ -612,28 +633,42 @@ def read_all_assignments(select=None, log=print):
                     continue
                 st = standby_status(t)
                 if st:
-                    # 待機・休み・留守 の枠。ここに割り当てられた人も読み取る。
+                    # 待機・休み・留守 の枠の見出し。待機と休み/留守が別列で2つ続けて
+                    # 現れるので、見出しのx中心を覚えておき、後続の氏名ブロックを最も
+                    # 近い列に割り当てて待機/休みを区別する。
                     current_customer = t
                     current_status = st
+                    bl, _, br, _ = child["rect"]
+                    standby_cols.append(((bl + br) / 2, st, t))
                 else:
                     current_customer = _clean_customer(t)
                     current_status = ""
+                    standby_cols = []
             elif child["ct"] == "Custom" and current_customer:
-                rec = _parse_block(child, current_customer)
-                # 待機/休み枠は車両欄が無く氏名だけ並ぶので、左右を問わず全員拾う
-                workers = worker_badges(child, include_left=bool(current_status))
                 if current_status:
+                    # 待機/休み枠は氏名がブロック直下Textに入る別構造。専用関数で拾う
+                    workers = standby_workers(child)
+                    bl, _, br, _ = child["rect"]
+                    bx = (bl + br) / 2
+                    cust, status = current_customer, current_status
+                    if standby_cols:
+                        _, status, cust = min(standby_cols,
+                                              key=lambda c: abs(c[0] - bx))
                     standby_count += len(workers)
-                for wname, badge in workers:
-                    rows.append({
-                        "office": office,
-                        "date": date_iso,
-                        "customer": current_customer,
-                        "site": rec["site"],
-                        "worker": wname,
-                        "badge": badge,
-                        "status": current_status,
-                    })
+                    for wname, badge in workers:
+                        rows.append({
+                            "office": office, "date": date_iso,
+                            "customer": cust, "site": "",
+                            "worker": wname, "badge": badge, "status": status,
+                        })
+                else:
+                    rec = _parse_block(child, current_customer)
+                    for wname, badge in worker_badges(child):
+                        rows.append({
+                            "office": office, "date": date_iso,
+                            "customer": current_customer, "site": rec["site"],
+                            "worker": wname, "badge": badge, "status": "",
+                        })
         log(f"  {office or '営業所不明'} {date_iso or '日付不明'}: "
             f"{len(rows) - before} 名 (うち待機/休み {standby_count} 名)")
     log(f"全作業員 読取完了: 合計 {len(rows)} 名")
