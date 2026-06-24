@@ -154,16 +154,91 @@ class App:
         self.log.see("end")
 
     def _run_live(self):
-        self._start_run(inspect_path=None)
+        # 開いている番割を列挙し、対象を選ばせてから集計する
+        if not self.roster_paths:
+            messagebox.showwarning("名簿が未指定", "先に社員名簿を追加してください。")
+            return
+        self.btn_run.config(state="disabled")
+        self._logmsg("開いている番割予定表を確認しています...")
+
+        def work():
+            try:
+                boards = U.list_boards(log=lambda s: self.q.put(("log", s)))
+                self.q.put(("boards", boards))
+            except Exception as e:
+                self.q.put(("error", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _run_inspect(self):
         p = filedialog.askopenfilename(
             title="workers_inspect.txt を選択",
             filetypes=[("テキスト", "*.txt"), ("すべて", "*.*")])
         if p:
-            self._start_run(inspect_path=p)
+            self._start_compute(inspect_path=p, select=None)
 
-    def _start_run(self, inspect_path):
+    def _choose_boards(self, boards):
+        """開いている番割をチェックボックスで一覧表示し、集計対象を選ばせる。"""
+        if not boards:
+            self._logmsg("番割予定表ウィンドウが見つかりませんでした。")
+            messagebox.showwarning(
+                "番割が見つかりません",
+                "開いている番割予定表ウィンドウが見つかりませんでした。\n"
+                "Hksで番割予定表を表示してから、もう一度実行してください。")
+            self.btn_run.config(state="normal")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("集計する番割を選ぶ")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        ttk.Label(dlg, text="集計する番割にチェックを入れてください(営業所×日付)。"
+                  ).pack(anchor="w", padx=12, pady=(12, 4))
+
+        body = ttk.Frame(dlg)
+        body.pack(fill="both", expand=True, padx=12, pady=4)
+        vars_ = []
+        for b in boards:
+            v = tk.BooleanVar(value=True)
+            office = b.get("office") or "営業所不明"
+            date = b.get("date") or "日付不明"
+            upd = b.get("update_hhmm")
+            label = f"{office}    {date}" + (f"    ({upd} 更新)" if upd else "")
+            ttk.Checkbutton(body, text=label, variable=v).pack(anchor="w", pady=1)
+            vars_.append((v, b))
+
+        def set_all(val):
+            for v, _ in vars_:
+                v.set(val)
+
+        bar = ttk.Frame(dlg)
+        bar.pack(fill="x", padx=12, pady=4)
+        ttk.Button(bar, text="全選択", command=lambda: set_all(True)).pack(side="left")
+        ttk.Button(bar, text="全解除", command=lambda: set_all(False)).pack(
+            side="left", padx=4)
+
+        def on_ok():
+            select = [(b.get("office", ""), b.get("date", ""))
+                      for v, b in vars_ if v.get()]
+            if not select:
+                messagebox.showinfo("未選択", "1つ以上の番割を選んでください。", parent=dlg)
+                return
+            dlg.destroy()
+            self._logmsg(f"選んだ {len(select)} 件の番割から集計します。")
+            self._start_compute(inspect_path=None, select=select)
+
+        def on_cancel():
+            dlg.destroy()
+            self._logmsg("集計をキャンセルしました。")
+            self.btn_run.config(state="normal")
+
+        act = ttk.Frame(dlg)
+        act.pack(fill="x", padx=12, pady=(4, 12))
+        ttk.Button(act, text="この番割で集計", command=on_ok).pack(side="right")
+        ttk.Button(act, text="キャンセル", command=on_cancel).pack(side="right", padx=6)
+        dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    def _start_compute(self, inspect_path=None, select=None):
         if not self.roster_paths:
             messagebox.showwarning("名簿が未指定", "先に社員名簿を追加してください。")
             return
@@ -180,7 +255,7 @@ class App:
                     self.roster_paths, inspect_path=inspect_path,
                     cust_kw=self.settings["exclude_customer_keywords"],
                     site_kw=self.settings["exclude_site_keywords"],
-                    aliases=self.aliases,
+                    aliases=self.aliases, select=select,
                     log=lambda s: self.q.put(("log", s)))
                 _, review, nchk, nreco = U.write_outputs(reports)
                 self.q.put(("done", (reports, review, nchk, nreco)))
@@ -204,6 +279,8 @@ class App:
                 kind, payload = self.q.get_nowait()
                 if kind == "log":
                     self._logmsg(payload)
+                elif kind == "boards":
+                    self._choose_boards(payload)
                 elif kind == "gslog":
                     self._gslog(payload)
                 elif kind == "error":

@@ -371,6 +371,28 @@ def enumerate_windows():
     return result
 
 
+def board_key(meta):
+    """番割を一意に表すキー (営業所, 日付)。選択の照合に使う。"""
+    return (meta.get("office", ""), meta.get("date", ""))
+
+
+def list_boards(log=print):
+    """開いている番割予定表ウィンドウの一覧(選択用の軽量メタ)を返す。
+
+    GUI で「どの番割から集計するか」を選ばせるための、スレッドをまたいで安全に
+    受け渡せる情報だけを返す(pywinauto の win オブジェクトは含めない。COM は
+    生成スレッドでしか扱えないため、実際の読み取り時に各スレッドで列挙し直す)。
+
+    Returns: [{office, date, update_hhmm}]
+    """
+    boards = [{"office": m.get("office", ""),
+               "date": m.get("date", ""),
+               "update_hhmm": m.get("update_hhmm", "")}
+              for m in enumerate_windows()]
+    log(f"開いている番割予定表: {len(boards)} 画面")
+    return boards
+
+
 def _read_one_window(win, office, date_iso, update_hhmm, update_dt_iso, log):
     """1ウィンドウぶんのレコードを返す"""
     label = office or "営業所不明"
@@ -504,12 +526,15 @@ def worker_badges(block):
     return out
 
 
-def read_all_assignments(log=print):
+def read_all_assignments(select=None, log=print):
     """番割の「全作業員」を返す。稼働率計測用。
 
     read_windows / read_schedule は ETC 突合が目的のため車両が割り当たった
     ブロックしか残さない。稼働率では車両の有無に関係なく全作業員が要るので、
     こちらはフィルタせず作業員1人につき1行を返す。営業所バッジも併せて返す。
+
+    select: None なら開いている全番割を読む。(営業所, 日付) のタプル集合を渡すと、
+            その番割だけを読み取る(GUI でユーザーが選んだ番割に限定する用途)。
 
     Returns: [{office, date, customer, site, worker, badge}]
     """
@@ -518,6 +543,14 @@ def read_all_assignments(log=print):
         raise RuntimeError(
             "番割予定表ウィンドウが見つかりません。Hksで番割予定表を表示してください。"
         )
+    if select is not None:
+        wanted = {tuple(k) for k in select}
+        metas = [m for m in metas if board_key(m) in wanted]
+        if not metas:
+            raise RuntimeError(
+                "選択された番割予定表が見つかりません。"
+                "番割を開き直すか、対象を選び直してください。"
+            )
     rows = []
     for m in metas:
         win = m["win"]

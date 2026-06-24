@@ -458,8 +458,12 @@ def staff_set(lst):
 
 
 def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
-            aliases=None, staff=None, log=print):
-    """名簿と番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。"""
+            aliases=None, staff=None, select=None, log=print):
+    """名簿と番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。
+
+    select: None なら開いている全番割を集計。(営業所, 日付) のタプル集合を渡すと、
+            その番割だけを集計する(inspect_path 指定時は無視)。
+    """
     roster = load_rosters(roster_paths, active_only=True)
     if aliases is None:
         aliases = load_aliases()
@@ -472,7 +476,7 @@ def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
     if inspect_path:
         assignments = assignments_from_inspect(inspect_path)
     else:
-        assignments = assignments_from_hks(log=log)
+        assignments = assignments_from_hks(select=select, log=log)
     boards = defaultdict(list)
     for a in assignments:
         boards[(a.get("office", ""), a.get("date", ""))].append(a)
@@ -493,9 +497,18 @@ def collect_review(reports):
     return review
 
 
-def assignments_from_hks(log=print):
+def assignments_from_hks(select=None, log=print):
     import hks_reader as hr
-    return hr.read_all_assignments(log=log)
+    return hr.read_all_assignments(select=select, log=log)
+
+
+def list_boards(log=print):
+    """開いている番割の一覧 [{office, date, update_hhmm}] を返す。
+
+    GUI で「どの番割から集計するか」を選ばせるための列挙。実際の読み取りより軽い。
+    """
+    import hks_reader as hr
+    return hr.list_boards(log=log)
 
 
 def assignments_from_inspect(path):
