@@ -15,12 +15,16 @@
   外貨を産む現場 = 顧客名に除外キーワード(既定: 第一元商 / 宮崎興業)を含まない現場。
   管理費(送迎応援・寮清掃など)は分子から外す。
 
-  分母 = 在籍の自営業所作業員(=出勤 ＋ 休み・待機)
+  分母 = 出勤 ＋ 休み・待機 (= 在籍 − 事務所スタッフ等で番割に出ない人)
   分子 = そのうち外貨を産む現場に出た人
   稼働率 = 分子 ÷ 分母
 
+  ・出勤      = 番割に名前のある自営業所社員(名簿に照合できた人)
+  ・休み・待機 = 現場作業員で番割に名前なし(分母に算入)
+  ・事務所スタッフ等 = 事務・ダミー登録など。番割に出なければ分母から除く。
+                     名簿に判別列が無いので settings の non_field_staff(コード/氏名)で指定。
+  計上は名簿に照合できた人のみ(自社タグでも名簿に無い人は計上せず確認推奨に出す)。
   他営業所応援は「借りた人工」として別集計。集計対象外はカウントしない。
-  出勤数(番割に名前のある人)と「休み・待機(在籍だが番割に無い)」も内訳として出す。
 
 名簿CSVについて:
   全営業所を1ファイルにまとめた名簿を渡せば、各番割の見出しの営業所で自動的に
@@ -56,16 +60,19 @@ DEFAULT_SETTINGS = {
     # 外貨を産まない(管理費)現場の判定。いずれも「部分一致」で除外する。
     "exclude_customer_keywords": list(DEFAULT_EXCLUDE),  # 顧客名に含まれたら除外
     "exclude_site_keywords": [],                          # 現場名に含まれたら除外
+    # 事務所スタッフ・ダミー等、番割に出ないなら分母に数えない人(コード or 氏名)
+    "non_field_staff": [],
 }
 
 
 def load_settings(path):
-    """例外設定(除外キーワード)を読む。無ければ既定値。"""
+    """例外設定(除外キーワード・分母除外スタッフ)を読む。無ければ既定値。"""
     s = {k: list(v) for k, v in DEFAULT_SETTINGS.items()}
     p = Path(path)
     if p.exists():
         raw = json.loads(p.read_text(encoding="utf-8"))
-        for k in ("exclude_customer_keywords", "exclude_site_keywords"):
+        for k in ("exclude_customer_keywords", "exclude_site_keywords",
+                  "non_field_staff"):
             v = raw.get(k)
             if isinstance(v, list):
                 s[k] = [str(x) for x in v if str(x).strip()]
@@ -246,12 +253,15 @@ def is_excluded(customer, site, cust_kw, site_kw):
             or any(k in (site or "") for k in site_kw))
 
 
-def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
+def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
+                  staff=None):
     """1つの番割(office, date)の稼働率レポートを返す。
 
     rows:   [{customer, site, worker, badge}]
     roster: 名簿全体(Employee)。この営業所ぶんに絞って使う。
+    staff:  事務所スタッフ等のキー集合(コード/正規化氏名)。番割に出ないなら分母から除く。
     """
+    staff = staff or set()
     home = office_key(office)
     subset = [e for e in roster if e.office == home]
     roster_missing = not subset  # この営業所の名簿が無い(別営業所のみ渡された等)
@@ -272,13 +282,16 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
         kind, code = matcher.classify(worker, badge)
         key = code or worker
         exc = is_excluded(cust, site, cust_kw, site_kw)
-        if kind == "home":
-            home_on.add(key)
-            home_name[key] = worker
+        if kind == "home" and code is not None:
+            home_on.add(code)
+            home_name[code] = worker
             if office_key(badge) == home and office_key(badge):
-                home_lent.add(key)    # 自営業所タグ付き=貸出
-            (home_ovh if exc else home_rev).add(key)
+                home_lent.add(code)   # 自営業所タグ付き=貸出
+            (home_ovh if exc else home_rev).add(code)
             label = "自営業所"
+        elif kind == "home":
+            # 自社タグだが名簿に照合できない → 計上しない(下の review で補正を促す)
+            label = "自営業所(名簿未照合)"
         elif kind == "other":
             oth_on.add(key)
             oth_office[key] = office_key(badge) or "(不明)"
@@ -311,9 +324,23 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
     present = len(home_on)            # 番割に出ている自営業所社員(出勤)
     num = len(home_rev)               # うち外貨現場(=分子)
     ovh_only = len(home_ovh - home_rev)
-    roster_size = len(subset)         # 在籍(=分母。出勤+休み+待機)
-    idle = roster_size - present      # 休み・待機(在籍だが番割に名前なし)
-    rate = (num / roster_size) if roster_size else 0.0
+    roster_size = len(subset)         # 在籍(名簿の在籍社員数)
+
+    # 番割に出ていない在籍者を、現場作業員(休み/待機=分母に算入)と
+    # 事務所スタッフ等(番割に出ないなら分母から除外)に振り分ける。
+    def _is_staff(e):
+        return e.code in staff or _norm(e.name) in staff
+    absent_field = absent_staff = 0
+    for e in subset:
+        if e.code in home_on:
+            continue                  # 出勤(分母に算入)
+        if _is_staff(e):
+            absent_staff += 1         # 事務所スタッフで番割に無し → 分母から除外
+        else:
+            absent_field += 1         # 現場作業員で番割に無し → 休み/待機(分母に算入)
+    idle = absent_field
+    denominator = present + idle      # 出勤 + 休み待機(事務所スタッフの不在は除く)
+    rate = (num / denominator) if denominator else 0.0
 
     by_office = defaultdict(int)
     for k in oth_on:
@@ -323,9 +350,10 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases):
         "office": office, "date": date,
         "roster_missing": roster_missing,
         "roster_size": roster_size,
-        "denominator": roster_size, "present": present,
+        "denominator": denominator, "present": present,
         "revenue": num, "overhead_only": ovh_only,
-        "idle": idle, "rate": rate, "lent_out": len(home_lent),
+        "idle": idle, "staff_excluded": absent_staff,
+        "rate": rate, "lent_out": len(home_lent),
         "overhead_names": sorted(home_name[k] for k in (home_ovh - home_rev)),
         "other_total": len(oth_on), "other_revenue": len(oth_rev),
         "other_by_office": dict(by_office),
@@ -345,17 +373,21 @@ def render_board(r):
                  "稼働率は不正確です(その営業所の名簿CSVを渡してください)。")
         L.append("-" * 66)
     rate = r["rate"] * 100
-    L.append(f"★ 稼働率 = 外貨現場 {r['revenue']} ÷ 在籍 {r['denominator']} "
+    L.append(f"★ 稼働率 = 外貨現場 {r['revenue']} ÷ 分母 {r['denominator']} "
              f"= {rate:.1f}%")
-    L.append(f"   (分母=在籍。出勤 {r['present']} ＋ 休み・待機 {r['idle']})")
+    L.append(f"   (分母 = 出勤 {r['present']} ＋ 休み・待機 {r['idle']}。"
+             f"在籍 {r['roster_size']} − 事務等で番割不在 {r.get('staff_excluded', 0)})")
     L.append("-" * 66)
-    L.append("【自営業所 内訳(分母=在籍)】")
+    L.append("【自営業所 内訳】")
     L.append(f"  外貨を産む現場  : {r['revenue']:>4} 名  ← 稼働(分子)")
     if r.get("lent_out"):
         L.append(f"    └ うち他営業所へ貸出 : {r['lent_out']:>4} 名 "
                  f"(自営業所タグ。貸出も稼働として算入)")
     L.append(f"  管理費現場      : {r['overhead_only']:>4} 名  {r['overhead_names']}")
-    L.append(f"  休み・待機      : {r['idle']:>4} 名  (在籍だが番割に名前なし)")
+    L.append(f"  休み・待機      : {r['idle']:>4} 名  (現場作業員で番割に名前なし)")
+    if r.get("staff_excluded"):
+        L.append(f"  事務等(分母外)  : {r['staff_excluded']:>4} 名  "
+                 f"(番割に出ないので分母から除外)")
     L.append("")
     L.append("【他営業所からの応援(借りた人工)・別集計】")
     L.append(f"  実人数          : {r['other_total']:>4} 名  "
@@ -371,8 +403,9 @@ def render_board(r):
     return "\n".join(L)
 
 
-HISTORY_HEADER = ["日付", "営業所", "在籍(分母)", "出勤", "外貨(分子)",
-                  "管理費", "休み待機", "稼働率%", "他営業所応援", "対象外"]
+HISTORY_HEADER = ["日付", "営業所", "在籍", "分母", "出勤", "外貨(分子)",
+                  "管理費", "休み待機", "事務等除外", "稼働率%",
+                  "他営業所応援", "対象外"]
 
 
 def append_history(path, reports):
@@ -394,9 +427,10 @@ def append_history(path, reports):
             continue  # 同じ日付・営業所の古い行は捨てて入れ替え
         keep.append(row)
     for r in reports:
-        keep.append([r["date"], r["office"], r["roster_size"], r["present"],
-                     r["revenue"], r["overhead_only"], r["idle"],
-                     f"{r['rate'] * 100:.1f}", r["other_total"], r["ignored"]])
+        keep.append([r["date"], r["office"], r["roster_size"], r["denominator"],
+                     r["present"], r["revenue"], r["overhead_only"], r["idle"],
+                     r.get("staff_excluded", 0), f"{r['rate'] * 100:.1f}",
+                     r["other_total"], r["ignored"]])
     keep.sort(key=lambda x: (str(x[0]), str(x[1])))
     with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
@@ -414,16 +448,29 @@ def load_aliases(path=ALIASES_PATH):
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
+def staff_set(lst):
+    """事務スタッフ指定(コード/氏名の混在リスト)を照合用の集合にする。"""
+    s = set()
+    for x in lst or []:
+        x = str(x).strip()
+        if x:
+            s.add(x)
+            s.add(_norm(x))
+    return s
+
+
 def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
-            aliases=None, log=print):
+            aliases=None, staff=None, log=print):
     """名簿と番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。"""
     roster = load_rosters(roster_paths, active_only=True)
     if aliases is None:
         aliases = load_aliases()
-    if cust_kw is None or site_kw is None:
+    if cust_kw is None or site_kw is None or staff is None:
         s = load_settings(SETTINGS_PATH)
         cust_kw = s["exclude_customer_keywords"] if cust_kw is None else cust_kw
         site_kw = s["exclude_site_keywords"] if site_kw is None else site_kw
+        staff = s["non_field_staff"] if staff is None else staff
+    staff_keys = staff_set(staff)
     if inspect_path:
         assignments = assignments_from_inspect(inspect_path)
     else:
@@ -434,7 +481,7 @@ def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
     reports = []
     for (office, date), rows in sorted(boards.items()):
         reports.append(compute_board(office, date, rows, roster,
-                                     cust_kw, site_kw, aliases))
+                                     cust_kw, site_kw, aliases, staff_keys))
     return reports
 
 
@@ -483,10 +530,11 @@ def assignments_from_inspect(path):
 
 
 def save_settings(settings, path=SETTINGS_PATH):
-    """除外キーワード設定を JSON に保存する。"""
+    """除外キーワード・分母除外スタッフ設定を JSON に保存する。"""
     data = {
         "exclude_customer_keywords": list(settings.get("exclude_customer_keywords", [])),
         "exclude_site_keywords": list(settings.get("exclude_site_keywords", [])),
+        "non_field_staff": list(settings.get("non_field_staff", [])),
     }
     Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2),
                           encoding="utf-8")

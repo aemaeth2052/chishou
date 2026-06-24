@@ -3,5 +3,7 @@
   "_exclude_customer_keywords": "顧客名にこの語が含まれたら管理費(分子から除外)。例: 第一元商 宮崎興業",
   "exclude_customer_keywords": ["第一元商", "宮崎興業"],
   "_exclude_site_keywords": "現場名にこの語が含まれたら管理費。例: 送迎 寮 清掃 事務 社内",
-  "exclude_site_keywords": []
+  "exclude_site_keywords": [],
+  "_non_field_staff": "事務所スタッフ・ダミー等。番割に名前が無ければ分母に数えない人。社員コード(確実) か 氏名 で指定。例: 2229935(番割用ダミー), 0007695(宮崎営業所名のダミー)",
+  "non_field_staff": []
 }

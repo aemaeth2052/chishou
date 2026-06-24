@@ -109,12 +109,12 @@ class App:
         ttk.Button(run, text="出力フォルダを開く",
                    command=self._open_folder).pack(side="right")
 
-        cols = ("営業所", "日付", "在籍", "出勤", "外貨", "稼働率%",
+        cols = ("営業所", "日付", "在籍", "分母", "出勤", "外貨", "稼働率%",
                 "貸出", "他営業所応援", "対象外")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=10)
         for c in cols:
             self.tree.heading(c, text=c)
-            w = 150 if c == "営業所" else (70 if c in ("日付",) else 64)
+            w = 150 if c == "営業所" else (70 if c in ("日付",) else 60)
             self.tree.column(c, width=w, anchor="center")
         self.tree.column("営業所", anchor="w")
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
@@ -222,9 +222,9 @@ class App:
             self.tree.delete(i)
         for r in reports:
             self.tree.insert("", "end", values=(
-                r["office"], r["date"], r["roster_size"], r["present"],
-                r["revenue"], f"{r['rate'] * 100:.1f}", r["lent_out"],
-                r["other_total"], r["ignored"]))
+                r["office"], r["date"], r["roster_size"], r["denominator"],
+                r["present"], r["revenue"], f"{r['rate'] * 100:.1f}",
+                r["lent_out"], r["other_total"], r["ignored"]))
         self.last_review = review
         self._refresh_review()
         self._logmsg(f"完了: {len(reports)} 営業所。"
@@ -252,9 +252,12 @@ class App:
         body.pack(fill="both", expand=True, padx=8, pady=4)
 
         self.lb_cust = self._kw_panel(
-            body, "顧客名キーワード", self.settings["exclude_customer_keywords"], 0)
+            body, "顧客名キーワード(部分一致)", self.settings["exclude_customer_keywords"], 0)
         self.lb_site = self._kw_panel(
-            body, "現場名キーワード", self.settings["exclude_site_keywords"], 1)
+            body, "現場名キーワード(部分一致)", self.settings["exclude_site_keywords"], 1)
+        self.lb_staff = self._kw_panel(
+            body, "事務所スタッフ等 分母除外(コード or 氏名)",
+            self.settings.get("non_field_staff", []), 2)
 
         ttk.Button(f, text="保存", command=self._save_exclude).pack(pady=8)
 
@@ -290,6 +293,7 @@ class App:
         self.settings = {
             "exclude_customer_keywords": list(self.lb_cust.get(0, "end")),
             "exclude_site_keywords": list(self.lb_site.get(0, "end")),
+            "non_field_staff": list(self.lb_staff.get(0, "end")),
         }
         U.save_settings(self.settings)
         messagebox.showinfo("保存しました",
