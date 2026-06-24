@@ -541,13 +541,19 @@ def read_all_assignments(log=print):
             root = _snap(pane)
         before = len(rows)
         current_customer = None
+        current_status = ""       # "待機"/"休み" 等の枠。通常現場は ""
         for child in root["children"]:
             if child["ct"] == "Text":
                 t = child["text"].strip()
-                if t and t not in NON_CUSTOMER:
+                if not t:
+                    continue
+                if t in NON_CUSTOMER:
+                    # 待機・休み・留守 の枠。ここに割り当てられた人も読み取る。
+                    current_customer = t
+                    current_status = "待機" if "待機" in t else "休み"
+                else:
                     current_customer = _clean_customer(t)
-                elif t in NON_CUSTOMER:
-                    current_customer = None
+                    current_status = ""
             elif child["ct"] == "Custom" and current_customer:
                 rec = _parse_block(child, current_customer)
                 for wname, badge in worker_badges(child):
@@ -558,6 +564,7 @@ def read_all_assignments(log=print):
                         "site": rec["site"],
                         "worker": wname,
                         "badge": badge,
+                        "status": current_status,
                     })
         log(f"  {office or '営業所不明'} {date_iso or '日付不明'}: "
             f"{len(rows) - before} 名")

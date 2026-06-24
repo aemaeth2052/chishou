@@ -33,7 +33,7 @@ def _rows_from_reports(reports):
     out = []
     for r in reports:
         out.append([r["date"], r["office"], r["roster_size"], r["present"],
-                    r["revenue"], r["overhead_only"], r["idle"],
+                    r["revenue"], r["overhead_only"], r["standby"], r["absent"],
                     round(r["rate"] * 100, 1), r["other_total"], r["ignored"]])
     return out
 
