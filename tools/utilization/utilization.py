@@ -203,14 +203,22 @@ def suggest_roster(name, subset, limit=3):
 
 
 class Matcher:
-    """ある営業所(home)について、番割の (表示名, バッジ) → 区分 を判定する。
+    """ある営業所(home)について、番割の (表示名, バッジ, 背景色) → 区分 を判定する。
 
     区分: 'home'(自営業所) / 'other'(他営業所応援) / 'ignore'(集計対象外)
+
+    判定の優先順位(ハイブリッド):
+      1. 手動補正(name_aliases)        … 最優先
+      2. 氏名セルの背景色(worker_colors) … 色が登録済みなら主判定
+      3. バッジ＋名簿CSV(従来)          … 色が未登録/未採取のときのフォールバック兼裏取り
+
+    色と従来判定(他営業所バッジ or 名簿一致)が食い違う行は備考に印を付け、確認に回す。
     """
 
-    def __init__(self, home_key, roster_subset, aliases=None):
+    def __init__(self, home_key, roster_subset, aliases=None, colormap=None):
         self.home = home_key
         self.aliases = aliases or {}
+        self.colormap = colormap        # worker_color.ColorMap or None
         self.full = {}       # 正規化フルネーム -> code
         self.kana_tok = {}   # 外国人カナトークン -> code
         for e in roster_subset:
@@ -229,15 +237,8 @@ class Matcher:
             return self.kana_tok[n]
         return None
 
-    def classify(self, name, badge=""):
-        """(区分, 名簿コード) を返す。"""
-        if name in self.aliases:  # 手動補正が最優先
-            v = self.aliases[name]
-            if v in ("other", "他営業所", "応援"):
-                return "other", None
-            if v in ("ignore", "対象外", ""):
-                return "ignore", None
-            return "home", v
+    def _badge_roster(self, name, badge):
+        """従来判定: バッジ＋名簿 から (区分, 名簿コード) を返す。"""
         bo = office_key(badge)
         if bo and bo != self.home:
             return "other", None          # 他営業所バッジ → 他営業所応援
@@ -248,6 +249,31 @@ class Matcher:
             return "home", code           # バッジ無し&名簿○ → 自営業所
         return "ignore", None             # バッジ無し&名簿× → 他営業所の自前労務
 
+    def classify(self, name, badge="", bg=""):
+        """(区分, 名簿コード, 備考) を返す。備考は確認用の判定根拠/不一致メモ。"""
+        if name in self.aliases:  # 手動補正が最優先
+            v = self.aliases[name]
+            if v in ("other", "他営業所", "応援"):
+                return "other", None, "手動:他営業所"
+            if v in ("ignore", "対象外", ""):
+                return "ignore", None, "手動:対象外"
+            return "home", v, "手動:自社"
+
+        badge_kind, code = self._badge_roster(name, badge)
+        color_kind = self.colormap.classify(bg) if self.colormap else None
+        if color_kind:
+            # 従来判定が確定的(他営業所バッジ or 名簿一致)なのに色と食い違う→不一致を記録
+            decisive = bool(office_key(badge)) or code is not None
+            if decisive and badge_kind != color_kind:
+                note = f"色={color_kind}/従来={badge_kind} 不一致"
+            else:
+                note = f"色判定:{color_kind}"
+            if color_kind == "home":
+                return "home", code, note   # 色は自社。名簿コードがあれば付ける
+            return color_kind, None, note
+        # 色が無い/未登録 → 従来(バッジ＋名簿)で判定
+        return badge_kind, code, ""
+
 
 # --------------------------------------------------------------------- 集計
 def is_excluded(customer, site, cust_kw, site_kw):
@@ -257,18 +283,19 @@ def is_excluded(customer, site, cust_kw, site_kw):
 
 
 def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
-                  staff=None):
+                  staff=None, colormap=None):
     """1つの番割(office, date)の稼働率レポートを返す。
 
-    rows:   [{customer, site, worker, badge}]
+    rows:   [{customer, site, worker, badge, bg}]
     roster: 名簿全体(Employee)。この営業所ぶんに絞って使う。
     staff:  事務所スタッフ等のキー集合(コード/正規化氏名)。番割に出ないなら分母から除く。
+    colormap: worker_color.ColorMap。氏名の背景色で自社/他社を主判定する(無ければ従来判定)。
     """
     staff = staff or set()
     home = office_key(office)
     subset = [e for e in roster if e.office == home]
     roster_missing = not subset  # この営業所の名簿が無い(別営業所のみ渡された等)
-    matcher = Matcher(home, subset, aliases)
+    matcher = Matcher(home, subset, aliases, colormap)
 
     home_on, home_rev, home_ovh = set(), set(), set()
     home_standby = set()              # 待機・休み枠に割り当てられた自営業所社員(分母内)
@@ -285,9 +312,10 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
     for a in rows:
         cust, site, worker = a["customer"], a["site"], a["worker"]
         badge = a.get("badge", "")
+        bg = a.get("bg", "")
         status = a.get("status", "")
         is_standby = bool(status) or cust in STANDBY_LABELS
-        kind, code = matcher.classify(worker, badge)
+        kind, code, cnote = matcher.classify(worker, badge, bg)
         if is_standby and kind == "ignore":
             # 待機/休み枠はこの営業所の番割に載っている=自前の要員。バッジ無し&名簿
             # 未照合(ignore は必ずバッジ無し)でも、この営業所の自社として分母に算入する。
@@ -323,13 +351,18 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
             label = "対象外"
         field = "待機/休み" if is_standby else ("管理費" if exc else "外貨")
         details.append({"office": office, "date": date, "worker": worker,
-                        "badge": badge, "kind": label, "field": field,
-                        "customer": cust, "site": site})
+                        "badge": badge, "bg": bg, "kind": label, "field": field,
+                        "note": cnote, "customer": cust, "site": site})
 
-        # 取りこぼし候補: 自社かもしれないのに対象外/名簿未照合になっている人。
-        # 日本人フルネームは確実に一致するので、対象はカナ(外国人)と自社タグ未照合のみ。
+        # 取りこぼし候補: 自社かもしれないのに対象外/名簿未照合になっている人、
+        # および 色と従来判定が食い違う人。日本人フルネームは確実に一致するので、
+        # 名簿未照合の対象はカナ(外国人)と自社タグ/色未照合のみ。
         reason = None
-        if kind == "ignore" and _is_kana(worker):
+        if "不一致" in cnote:
+            reason = ("要確認", f"判定:{label}",
+                      f"色と従来(バッジ/名簿)が不一致({cnote})。"
+                      "色設定 or name_aliases.json で確定させてください")
+        elif kind == "ignore" and _is_kana(worker):
             reason = ("要確認", "対象外(他営業所自前)",
                       "自社の外国人かも→ name_aliases.json にコードを書けば自社に算入")
         elif kind == "home" and code is None:
@@ -337,7 +370,8 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
                       "自社タグだが名簿に無い→ name_aliases.json にコード指定を推奨")
         if reason and worker not in review:
             review[worker] = {"priority": reason[0], "office": office, "date": date,
-                              "worker": worker, "badge": badge, "current": reason[1],
+                              "worker": worker, "badge": badge, "bg": bg,
+                              "current": reason[1],
                               "customer": cust, "site": site, "hint": reason[2],
                               "suggest": suggest_roster(worker, subset)}
 
@@ -472,15 +506,19 @@ def staff_set(lst):
 
 
 def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
-            aliases=None, staff=None, select=None, log=print):
+            aliases=None, staff=None, select=None, colormap=None, log=print):
     """名簿と番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。
 
     select: None なら開いている全番割を集計。(営業所, 日付) のタプル集合を渡すと、
             その番割だけを集計する(inspect_path 指定時は無視)。
+    colormap: worker_color.ColorMap。None なら worker_colors.json を読む。色が登録
+            されていれば氏名の背景色で自社/他社を主判定する。
     """
     roster = load_rosters(roster_paths, active_only=True)
     if aliases is None:
         aliases = load_aliases()
+    if colormap is None:
+        colormap = load_colormap()
     if cust_kw is None or site_kw is None or staff is None:
         s = load_settings(SETTINGS_PATH)
         cust_kw = s["exclude_customer_keywords"] if cust_kw is None else cust_kw
@@ -490,14 +528,16 @@ def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
     if inspect_path:
         assignments = assignments_from_inspect(inspect_path)
     else:
-        assignments = assignments_from_hks(select=select, log=log)
+        # 色マップが登録されているときだけ採色する(空なら従来どおりで採色コスト無し)
+        assignments = assignments_from_hks(select=select, color=bool(colormap), log=log)
     boards = defaultdict(list)
     for a in assignments:
         boards[(a.get("office", ""), a.get("date", ""))].append(a)
     reports = []
     for (office, date), rows in sorted(boards.items()):
         reports.append(compute_board(office, date, rows, roster,
-                                     cust_kw, site_kw, aliases, staff_keys))
+                                     cust_kw, site_kw, aliases, staff_keys,
+                                     colormap=colormap))
     return reports
 
 
@@ -511,9 +551,27 @@ def collect_review(reports):
     return review
 
 
-def assignments_from_hks(select=None, log=print):
+def assignments_from_hks(select=None, color=False, log=print):
     import hks_reader as hr
-    return hr.read_all_assignments(select=select, log=log)
+    color_factory = None
+    if color:
+        try:
+            import worker_color as wc
+            color_factory = wc.make_window_sampler
+            wc.reset_screen_cache()  # 番割が動いている場合に備え採色キャッシュを更新
+        except Exception as e:
+            log(f"色採取モジュールを読み込めませんでした(色判定なしで続行): {e}")
+    return hr.read_all_assignments(select=select, log=log,
+                                   color_factory=color_factory)
+
+
+def load_colormap():
+    """worker_colors.json を読んで ColorMap を返す。読めなければ空マップ。"""
+    try:
+        import worker_color as wc
+        return wc.load_color_map()
+    except Exception:
+        return None
 
 
 def list_boards(log=print):
@@ -543,16 +601,21 @@ def assignments_from_inspect(path):
         parts = re.split(r" {2,}", ln.rstrip())
         if len(parts) < 3 or not parts[2].strip():
             continue
-        badge = ""
+        badge, bg = "", ""
         for x in parts[3:]:
             x = x.strip()
-            if x and not x.startswith("#") and x not in ("○", "×"):
+            if not x or x in ("○", "×"):
+                continue
+            if re.fullmatch(r"#[0-9A-Fa-f]{6}", x):
+                bg = x.upper()           # 背景色(自社/他社の色判定用)
+            else:
                 badge = x
         cust = parts[0].strip()
         status = "待機" if "待機" in cust else ("休み" if cust in STANDBY_LABELS else "")
         out.append({"office": office, "date": date,
                     "customer": cust, "site": parts[1].strip(),
-                    "worker": parts[2].strip(), "badge": badge, "status": status})
+                    "worker": parts[2].strip(), "badge": badge, "bg": bg,
+                    "status": status})
     return out
 
 
@@ -594,22 +657,24 @@ def write_outputs(reports, out_path=None, csv_path=None,
 
     with open(csv_path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["営業所", "日付", "作業員", "バッジ", "区分", "現場種別", "顧客", "現場"])
+        w.writerow(["営業所", "日付", "作業員", "バッジ", "背景色", "区分",
+                    "現場種別", "判定備考", "顧客", "現場"])
         for r in reports:
             for d in r["details"]:
                 w.writerow([d["office"], d["date"], d["worker"], d["badge"],
-                            d["kind"], d["field"], d["customer"], d["site"]])
+                            d.get("bg", ""), d["kind"], d["field"],
+                            d.get("note", ""), d["customer"], d["site"]])
 
     append_history(history_path, reports)
 
     review = collect_review(reports)
     with open(review_path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["優先", "営業所", "日付", "氏名(対照表のキー)", "バッジ",
+        w.writerow(["優先", "営業所", "日付", "氏名(対照表のキー)", "バッジ", "背景色",
                     "現在の判定", "推奨コード候補", "顧客", "現場", "対応のヒント"])
         for x in review:
             w.writerow([x["priority"], x["office"], x["date"], x["worker"], x["badge"],
-                        x["current"], x.get("suggest", ""),
+                        x.get("bg", ""), x["current"], x.get("suggest", ""),
                         x["customer"], x["site"], x["hint"]])
 
     n_check = sum(1 for x in review if x["priority"] == "要確認")

@@ -516,15 +516,16 @@ def build_vehicle_map(records):
     return m
 
 
-def worker_badges(block):
-    """1ブロックから (作業員名, 営業所バッジ) のリストを返す。
+def worker_cells(block):
+    """1ブロックから (作業員名, 営業所バッジ, 氏名セルの矩形) のリストを返す。
 
     番割では作業員の所属営業所が氏名の前のバッジ(蘇我/若松/八幡/都賀/加曽利/宮崎 等)
     で示される。_parse_block の workers はバッジを落とすので、稼働率の営業所判定用に
     ここでバッジ込みで取り出す。氏名セル内の末尾テキスト=氏名、それより前=バッジ。
+    氏名ノードの矩形も返すので、背景色(自社/他社)の採色に使える。
 
     通常現場のブロックは「左=車両/フラグ、右=作業員」なので右半分(mid_x より右)の
-    入れ子 Custom セルだけを見る。待機/休み枠は構造が異なる(standby_workers 参照)。
+    入れ子 Custom セルだけを見る。待機/休み枠は構造が異なる(standby_cells 参照)。
     """
     fields = _fields_of(block)
     bl, _, br, _ = block["rect"]
@@ -536,46 +537,92 @@ def worker_badges(block):
         cx = (f["rect"][0] + f["rect"][2]) / 2
         if cx <= mid_x:
             continue  # 左側は車両・フラグ
-        texts = [c["text"].strip() for c in f["children"] if c["text"].strip()]
+        texts = [c for c in f["children"] if c["text"].strip()]
         if not texts:
             continue
-        name = _clean_worker_name(texts[-1])
-        badge = " ".join(texts[:-1]).strip()
+        last = texts[-1]                                   # 氏名は末尾テキスト
+        name = _clean_worker_name(last["text"].strip())
+        badge = " ".join(t["text"].strip() for t in texts[:-1]).strip()
         if name:
-            out.append((name, badge))
+            out.append((name, badge, last["rect"]))
+    return out
+
+
+def worker_badges(block):
+    """1ブロックから (作業員名, 営業所バッジ) のリストを返す(矩形なし・互換用)。"""
+    return [(name, badge) for name, badge, _ in worker_cells(block)]
+
+
+def standby_cells(block):
+    """待機/休み枠のブロックから (氏名, バッジ, 氏名の矩形) のリストを返す。
+
+    待機/休み枠のブロックは通常現場と構造が違い、氏名が入れ子の Custom セルではなく
+    ブロック直下の Text に入っている(実ダンプ例: [Text(''), Text('柿木久男')])。
+    そのため worker_cells(右側 Custom セル=作業員)では 0 人になってしまう。
+    ここではブロック直下の Text を氏名として拾い、念のため入れ子 Custom セルにも
+    氏名があれば併せて拾う。末尾の非空テキストを氏名、それ以前を営業所バッジとみなす。
+    氏名ノードの矩形も返すので背景色の採色に使える。
+    """
+    fields = _fields_of(block)
+    out = []
+    direct = [f for f in fields if f["ct"] == "Text" and f["text"].strip()]
+    if direct:
+        name = _clean_worker_name(direct[-1]["text"].strip())
+        if name:
+            badge = " ".join(f["text"].strip() for f in direct[:-1]).strip()
+            out.append((name, badge, direct[-1]["rect"]))
+    for f in fields:
+        if f["ct"] != "Custom":
+            continue
+        texts = [c for c in f["children"] if c["text"].strip()]
+        if not texts:
+            continue
+        name = _clean_worker_name(texts[-1]["text"].strip())
+        if name:
+            badge = " ".join(t["text"].strip() for t in texts[:-1]).strip()
+            out.append((name, badge, texts[-1]["rect"]))
     return out
 
 
 def standby_workers(block):
-    """待機/休み枠のブロックから (氏名, バッジ) のリストを返す。
+    """待機/休み枠のブロックから (氏名, バッジ) のリストを返す(矩形なし・互換用)。"""
+    return [(name, badge) for name, badge, _ in standby_cells(block)]
 
-    待機/休み枠のブロックは通常現場と構造が違い、氏名が入れ子の Custom セルではなく
-    ブロック直下の Text に入っている(実ダンプ例: [Text(''), Text('柿木久男')])。
-    そのため worker_badges(右側 Custom セル=作業員)では 0 人になってしまう。
-    ここではブロック直下の Text を氏名として拾い、念のため入れ子 Custom セルにも
-    氏名があれば併せて拾う。末尾の非空テキストを氏名、それ以前を営業所バッジとみなす。
+
+def iter_board_workers(root):
+    """Pane ツリーから作業員を順に返す共通ジェネレータ(色スキャン/インスペクタ用)。
+
+    yield: (顧客, 現場or状態, 氏名, バッジ, 氏名矩形, is_standby, 車両有無)
+      ・通常現場: is_standby=False、第2要素=現場名、車両有無=Bool
+      ・待機/休み枠: is_standby=True、第2要素=状態('待機'/'休み')、車両有無=False
     """
-    fields = _fields_of(block)
-    out = []
-    direct = [f["text"].strip() for f in fields
-              if f["ct"] == "Text" and f["text"].strip()]
-    if direct:
-        name = _clean_worker_name(direct[-1])
-        if name:
-            out.append((name, " ".join(direct[:-1]).strip()))
-    for f in fields:
-        if f["ct"] != "Custom":
-            continue
-        texts = [c["text"].strip() for c in f["children"] if c["text"].strip()]
-        if not texts:
-            continue
-        name = _clean_worker_name(texts[-1])
-        if name:
-            out.append((name, " ".join(texts[:-1]).strip()))
-    return out
+    current_customer = None
+    current_status = ""
+    for child in root["children"]:
+        if child["ct"] == "Text":
+            t = child["text"].strip()
+            if not t:
+                continue
+            st = standby_status(t)
+            if st:
+                current_customer, current_status = t, st
+            elif t in NON_CUSTOMER:
+                current_customer, current_status = None, ""
+            else:
+                current_customer = _clean_customer(t)
+                current_status = ""
+        elif child["ct"] == "Custom" and current_customer:
+            if current_status:
+                for name, badge, rect in standby_cells(child):
+                    yield current_customer, current_status, name, badge, rect, True, False
+            else:
+                rec = _parse_block(child, current_customer)
+                has_v = bool(rec["vehicle_no"])
+                for name, badge, rect in worker_cells(child):
+                    yield current_customer, rec["site"], name, badge, rect, False, has_v
 
 
-def read_all_assignments(select=None, log=print):
+def read_all_assignments(select=None, log=print, color_factory=None):
     """番割の「全作業員」を返す。稼働率計測用。
 
     read_windows / read_schedule は ETC 突合が目的のため車両が割り当たった
@@ -585,7 +632,11 @@ def read_all_assignments(select=None, log=print):
     select: None なら開いている全番割を読む。(営業所, 日付) のタプル集合を渡すと、
             その番割だけを読み取る(GUI でユーザーが選んだ番割に限定する用途)。
 
-    Returns: [{office, date, customer, site, worker, badge}]
+    color_factory: (win)->採色器(bg(rect)->'#RRGGBB') を返す関数。渡すと氏名セルの
+            背景色を採取して各行の "bg" に入れる(自社/他社を色で判定する用途)。
+            None なら "bg" は ""。本モジュールは採色実装に依存しない(注入式)。
+
+    Returns: [{office, date, customer, site, worker, badge, bg}]
     """
     metas = enumerate_windows()
     if not metas:
@@ -605,6 +656,22 @@ def read_all_assignments(select=None, log=print):
         win = m["win"]
         office = m.get("office", "")
         date_iso = m.get("date", "")
+        sampler = None
+        if color_factory is not None:
+            try:
+                sampler = color_factory(win)
+            except Exception as e:
+                log(f"  {office or '営業所不明'}: 採色器の用意に失敗(色判定なしで続行): {e}")
+                sampler = None
+
+        def _bg(rect):
+            if sampler is None:
+                return ""
+            try:
+                return sampler.bg(rect)
+            except Exception:
+                return ""
+
         pane = None
         for c in win.children():
             try:
@@ -647,7 +714,7 @@ def read_all_assignments(select=None, log=print):
             elif child["ct"] == "Custom" and current_customer:
                 if current_status:
                     # 待機/休み枠は氏名がブロック直下Textに入る別構造。専用関数で拾う
-                    workers = standby_workers(child)
+                    workers = standby_cells(child)
                     bl, _, br, _ = child["rect"]
                     bx = (bl + br) / 2
                     cust, status = current_customer, current_status
@@ -655,19 +722,21 @@ def read_all_assignments(select=None, log=print):
                         _, status, cust = min(standby_cols,
                                               key=lambda c: abs(c[0] - bx))
                     standby_count += len(workers)
-                    for wname, badge in workers:
+                    for wname, badge, rect in workers:
                         rows.append({
                             "office": office, "date": date_iso,
                             "customer": cust, "site": "",
                             "worker": wname, "badge": badge, "status": status,
+                            "bg": _bg(rect),
                         })
                 else:
                     rec = _parse_block(child, current_customer)
-                    for wname, badge in worker_badges(child):
+                    for wname, badge, rect in worker_cells(child):
                         rows.append({
                             "office": office, "date": date_iso,
                             "customer": current_customer, "site": rec["site"],
                             "worker": wname, "badge": badge, "status": "",
+                            "bg": _bg(rect),
                         })
         log(f"  {office or '営業所不明'} {date_iso or '日付不明'}: "
             f"{len(rows) - before} 名 (うち待機/休み {standby_count} 名)")

@@ -4,6 +4,7 @@ __pycache__/
 roster.csv
 roster/
 name_aliases.json
+worker_colors.json
 utilization_settings.json
 utilization_app_config.json
 utilization_history.csv

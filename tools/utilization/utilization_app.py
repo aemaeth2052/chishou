@@ -22,6 +22,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import utilization as U
+import worker_color as WC
 
 try:
     import ttkbootstrap as ttkb
@@ -68,17 +69,20 @@ class App:
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         self.tab_run = ttk.Frame(nb)
         self.tab_excl = ttk.Frame(nb)
+        self.tab_color = ttk.Frame(nb)
         self.tab_alias = ttk.Frame(nb)
         self.tab_hist = ttk.Frame(nb)
         self.tab_gs = ttk.Frame(nb)
         nb.add(self.tab_run, text="集計")
         nb.add(self.tab_excl, text="除外設定")
+        nb.add(self.tab_color, text="色判定")
         nb.add(self.tab_alias, text="対照表")
         nb.add(self.tab_hist, text="履歴")
         nb.add(self.tab_gs, text="Google連携")
 
         self._build_run()
         self._build_exclude()
+        self._build_color()
         self._build_alias()
         self._build_history()
         self._build_gsheet()
@@ -282,6 +286,13 @@ class App:
                     self._logmsg(payload)
                 elif kind == "boards":
                     self._choose_boards(payload)
+                elif kind == "colorlog":
+                    self._color_log(payload)
+                elif kind == "colors":
+                    self._on_colors(payload)
+                elif kind == "colorerr":
+                    self._color_log("エラー: " + payload)
+                    self.btn_color_scan.config(state="normal")
                 elif kind == "gslog":
                     self._gslog(payload)
                 elif kind == "error":
@@ -378,6 +389,134 @@ class App:
         U.save_settings(self.settings)
         messagebox.showinfo("保存しました",
                             "除外設定を保存しました。次の集計から反映されます。")
+
+    # ----------------------------------------------------------- 色判定タブ
+    def _build_color(self):
+        f = self.tab_color
+        ttk.Label(
+            f, text="氏名の背景色で自社/他社を判定します。番割を開いて『番割の色を読み取る』を"
+            "押し、検出された各色に区分を割り当てて保存してください。"
+            "ここで割り当てた色が集計時の主判定になります(未割当の色はバッジ＋名簿で判定)。"
+        ).pack(anchor="w", padx=8, pady=(8, 2))
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", padx=8, pady=4)
+        self.btn_color_scan = ttk.Button(bar, text="番割の色を読み取る",
+                                         command=self._scan_colors)
+        self.btn_color_scan.pack(side="left")
+        ttk.Label(bar, text="  許容差:").pack(side="left")
+        cm = WC.load_color_map()
+        self.var_tol = tk.StringVar(value=str(getattr(cm, "tolerance", WC.DEFAULT_TOLERANCE)))
+        ttk.Entry(bar, textvariable=self.var_tol, width=5).pack(side="left")
+        ttk.Label(bar, text="(色が近いと同一視。番割の色は単色なので40前後)").pack(side="left")
+        ttk.Button(bar, text="保存", command=self._save_colors).pack(side="right")
+
+        cols = ("背景色", "区分", "人数", "バッジ", "例(氏名)")
+        widths = {"背景色": 90, "区分": 110, "人数": 60, "バッジ": 90, "例(氏名)": 360}
+        self.tree_color = ttk.Treeview(f, columns=cols, show="headings", height=10)
+        for c in cols:
+            self.tree_color.heading(c, text=c)
+            self.tree_color.column(c, width=widths.get(c, 90),
+                                   anchor="center" if c in ("区分", "人数") else "w")
+        self.tree_color.pack(fill="both", expand=True, padx=8, pady=4)
+
+        assign = ttk.Frame(f)
+        assign.pack(fill="x", padx=8, pady=4)
+        ttk.Label(assign, text="選択した色を:").pack(side="left")
+        ttk.Button(assign, text="自社", command=lambda: self._set_color_kind("home")
+                   ).pack(side="left", padx=2)
+        ttk.Button(assign, text="他営業所応援", command=lambda: self._set_color_kind("other")
+                   ).pack(side="left", padx=2)
+        ttk.Button(assign, text="対象外", command=lambda: self._set_color_kind("ignore")
+                   ).pack(side="left", padx=2)
+        ttk.Button(assign, text="未設定に戻す", command=lambda: self._set_color_kind("")
+                   ).pack(side="left", padx=8)
+
+        self.color_log = scrolledtext.ScrolledText(f, height=6)
+        self.color_log.pack(fill="both", expand=False, padx=8, pady=6)
+
+        # 既存の worker_colors.json があれば、それを一覧に出しておく
+        self._show_existing_colors(cm)
+
+    _KIND_JP = {"home": "自社", "other": "他営業所応援", "ignore": "対象外", "": "（未設定）"}
+
+    def _color_log(self, s):
+        self.color_log.insert("end", s + "\n")
+        self.color_log.see("end")
+
+    def _show_existing_colors(self, cm):
+        """保存済みの色マップを一覧に表示(スキャン前でも現状が見えるように)。"""
+        for i in self.tree_color.get_children():
+            self.tree_color.delete(i)
+        for rgb, kind, label in getattr(cm, "entries", []):
+            hexv = WC.hexc(rgb)
+            self._insert_color_row(hexv, kind, "", "", label or "(保存済み)")
+
+    def _insert_color_row(self, hexv, kind, count, badges, names):
+        tag = "c_" + hexv.lstrip("#")
+        try:
+            self.tree_color.tag_configure(tag, background=hexv)
+        except Exception:
+            pass
+        self.tree_color.insert("", "end", tags=(tag,), values=(
+            hexv, self._KIND_JP.get(kind, "（未設定）"), count, badges, names))
+
+    def _scan_colors(self):
+        self.btn_color_scan.config(state="disabled")
+        self._color_log("開いている番割を採色しています...")
+
+        def work():
+            try:
+                clusters = WC.scan_open_boards(
+                    log=lambda s: self.q.put(("colorlog", s)))
+                self.q.put(("colors", clusters))
+            except Exception as e:
+                self.q.put(("colorerr", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_colors(self, clusters):
+        self.btn_color_scan.config(state="normal")
+        # 既存マップで分かる色は区分を引き継いで初期表示する
+        cm = WC.load_color_map()
+        for i in self.tree_color.get_children():
+            self.tree_color.delete(i)
+        for c in clusters:
+            kind = cm.classify(c["hex"]) or ""
+            self._insert_color_row(c["hex"], kind, c["count"],
+                                   " ".join(c["badges"]), "、".join(c["names"]))
+        self._color_log(f"完了: {len(clusters)} 色。各色に区分を割り当てて『保存』してください。")
+
+    def _set_color_kind(self, kind):
+        sel = self.tree_color.selection()
+        if not sel:
+            messagebox.showinfo("未選択", "一覧から色の行を選んでください。")
+            return
+        for iid in sel:
+            vals = list(self.tree_color.item(iid, "values"))
+            vals[1] = self._KIND_JP.get(kind, "（未設定）")
+            self.tree_color.item(iid, values=vals)
+
+    def _save_colors(self):
+        jp2kind = {v: k for k, v in self._KIND_JP.items()}
+        colors = []
+        for iid in self.tree_color.get_children():
+            vals = self.tree_color.item(iid, "values")
+            hexv, kindjp = vals[0], vals[1]
+            kind = jp2kind.get(kindjp, "")
+            if kind:  # 未設定の色は保存しない(=従来判定にフォールバック)
+                colors.append({"hex": hexv, "kind": kind,
+                               "label": (vals[3] or "")})
+        try:
+            tol = int(self.var_tol.get())
+        except ValueError:
+            tol = WC.DEFAULT_TOLERANCE
+        WC.save_color_map(colors, tolerance=tol)
+        self._color_log(f"保存しました: {len(colors)} 色 → worker_colors.json "
+                        f"(許容差 {tol})。次の集計から色判定が効きます。")
+        messagebox.showinfo("保存しました",
+                            f"{len(colors)} 色を worker_colors.json に保存しました。\n"
+                            "次回の集計から、氏名の背景色で自社/他社を判定します。")
 
     # ----------------------------------------------------------- 対照表タブ
     def _build_alias(self):
