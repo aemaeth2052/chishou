@@ -794,11 +794,26 @@ class App:
 
     # ------------------------------------------------------------- 起動
 def main():
+    # worker_color の import 時にプロセスを DPI 対応にしている(採色の座標系を合わせるため)。
+    # その結果 tk が自動拡大しないので、画面のDPIに合わせて手動でスケール・初期サイズを補正する。
     if HAS_TTKB:
         root = ttkb.Window(themename="cosmo")
     else:
         root = tk.Tk()
+    dpi = 96
+    try:
+        import ctypes
+        dpi = ctypes.windll.user32.GetDpiForSystem() or 96
+        if dpi != 96:
+            root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception:
+        dpi = 96
     App(root)
+    if dpi != 96:  # App.__init__ が 960x640 を設定するので、その後に拡大率ぶん補正する
+        try:
+            root.geometry(f"{int(960 * dpi / 96)}x{int(640 * dpi / 96)}")
+        except Exception:
+            pass
     root.mainloop()
 
 

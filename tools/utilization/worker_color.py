@@ -124,6 +124,37 @@ class _BMI(ctypes.Structure):
     _fields_ = [("bmiHeader", _BMIH), ("bmiColors", wintypes.DWORD * 3)]
 
 
+_GDI_RESTYPES_DONE = {"v": False}
+
+
+def _init_gdi_restypes(user32, gdi32):
+    """GDI/User32 のハンドル戻り値を64bit幅に設定する(一度だけ)。
+
+    既定の ctypes は戻り値を 32bit int とみなすため、Win64 ではハンドル(ポインタ)が
+    切り詰められて PrintWindow/GetDIBits が無効ハンドルで失敗しうる。明示的に
+    restype/argtypes を設定して取りこぼしを防ぐ。
+    """
+    if _GDI_RESTYPES_DONE["v"]:
+        return
+    user32.GetWindowDC.restype = wintypes.HDC
+    user32.GetWindowDC.argtypes = [wintypes.HWND]
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.GetDIBits.argtypes = [
+        wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+        ctypes.c_void_p, ctypes.POINTER(_BMI), wintypes.UINT,
+    ]
+    _GDI_RESTYPES_DONE["v"] = True
+
+
 class WindowSampler(_BaseSampler):
     """PrintWindow で1ウィンドウのビットマップを取り、画面座標で色を引く採色器。
 
@@ -147,6 +178,7 @@ class WindowSampler(_BaseSampler):
     def _capture(self, hwnd):
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
+        _init_gdi_restypes(user32, gdi32)  # 64bit でハンドルが切り詰められないように
         rect = wintypes.RECT()
         if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
             return
@@ -275,7 +307,7 @@ def reset_screen_cache():
 
 
 def make_window_sampler(win):
-    """pywinauto のウィンドウから採色器を作る。
+    """pywinauto のウィンドウから採色器を作る(矩形検証なし・互換用)。
 
     まず PrintWindow を試し、黒画像など失敗したら共有のスクリーン採色に切り替える。
     返り値は bg(rect)->'#RRGGBB' を持つ採色器。失敗時も必ず何か返す(最低限スクリーン)。
@@ -286,6 +318,45 @@ def make_window_sampler(win):
         if hwnd:
             ws = WindowSampler(hwnd)
             if ws.ok:
+                return ws
+    except Exception:
+        pass
+    return _shared_screen()
+
+
+def _sample_rects(root, limit=10):
+    """番割ツリーから検証用の氏名セル矩形を数点集める。"""
+    import hks_reader as hr
+    out = []
+    for _c, _s, _n, _b, rect, _sb, _hv in hr.iter_board_workers(root):
+        if rect and rect[2] - rect[0] >= 2 and rect[3] - rect[1] >= 2:
+            out.append(rect)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _sampler_hits(sampler, rects):
+    """サンプル矩形のうち1つでも背景色が取れれば True(座標系が合っている)。"""
+    if not rects:
+        return True   # 検証材料が無ければ採用(従来挙動)
+    return any(sampler.bg(r) for r in rects)
+
+
+def make_sampler_for(win, root):
+    """win＋番割ツリーから最適な採色器を選ぶ。
+
+    PrintWindow を試し、氏名セルを実際に数点サンプルして色が取れるか検証する。
+    取れなければ(座標系のズレ/PrintWindow が描けない等)画面キャプチャ採色に切替える。
+    どちらでも取れない場合も画面採色を返す(集計は色なしで続行できる)。
+    """
+    _set_dpi_aware()
+    rects = _sample_rects(root)
+    try:
+        hwnd = getattr(win, "handle", None)
+        if hwnd:
+            ws = WindowSampler(int(hwnd))
+            if ws.ok and _sampler_hits(ws, rects):
                 return ws
     except Exception:
         pass
@@ -366,17 +437,20 @@ def scan_open_boards(select=None, log=print):
         if pane is None:
             log(f"  {office}: カード領域が見つからずスキップ")
             continue
-        sampler = make_window_sampler(win)
         try:
             root = hr._snap_cached(pane)
         except Exception:
             root = hr._snap(pane)
+        sampler = make_sampler_for(win, root)
         n = miss = 0
+        first_miss_rect = None
         for _cust, _site, name, badge, rect, _sb, _hv in hr.iter_board_workers(root):
             n += 1
             rgb = to_rgb(sampler.bg(rect))
             if rgb is None:
                 miss += 1
+                if first_miss_rect is None:
+                    first_miss_rect = rect
                 continue
             key = cluster_key(rgb)
             c = clusters.setdefault(key, {"hex": hexc(rgb), "count": 0,
@@ -387,6 +461,17 @@ def scan_open_boards(select=None, log=print):
             if len(c["names"]) < 12:
                 c["names"].append(name)
         log(f"  {office} (採色 {sampler.mode}): {n} 名 / 背景色取得不能 {miss}")
+        if n and miss == n:
+            # 全滅は座標系のズレ(DPI拡大率>100%でプロセスがDPI非対応)が主因。
+            sm = getattr(sampler, "mode", "?")
+            extra = ""
+            if sm == "printwindow":
+                extra = (f" 窓左上({sampler.left},{sampler.top}) "
+                         f"ビットマップ{sampler.w}x{sampler.h}")
+            log(f"  ⚠ {office}: 全{n}名の背景色が取れません(採色 {sm}{extra}"
+                f" / 氏名矩形例 {first_miss_rect})。"
+                "画面の拡大率が100%超の可能性。GUIを再起動すると改善することがあります"
+                "(起動時にDPI対応を有効化)。改善しなければ番割を最前面・全表示で再試行を。")
 
     out = [{"hex": c["hex"], "count": c["count"],
             "badges": sorted(c["badges"]), "names": c["names"]}
@@ -451,3 +536,9 @@ def save_color_map(colors, tolerance=DEFAULT_TOLERANCE, path=COLORS_PATH):
     base["tolerance"] = int(tolerance)
     base["colors"] = out
     p.write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# このモジュールを import した時点で DPI 認識にしておく。GUI(utilization_app)は先頭で
+# worker_color を import するため、tk.Tk() でウィンドウを作る前にプロセスが DPI 対応になり、
+# UIA の矩形(物理px)と GetWindowRect/PrintWindow(物理px)の座標系が一致する。
+_set_dpi_aware()

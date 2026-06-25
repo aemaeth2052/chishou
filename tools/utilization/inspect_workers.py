@@ -82,12 +82,12 @@ def main():
             w(f"\n[{office} {date_iso}] カード領域(Pane)が見つからずスキップ")
             continue
 
-        sampler = wc.make_window_sampler(win)
         try:
             root = hr._snap_cached(pane)
         except Exception as e:
             w(f"  高速読取に失敗、通常方式に切替: {e}")
             root = hr._snap(pane)
+        sampler = wc.make_sampler_for(win, root)  # 氏名矩形で座標系を検証して採色器を選ぶ
 
         w("")
         w("#" * 78)

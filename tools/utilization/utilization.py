@@ -557,7 +557,7 @@ def assignments_from_hks(select=None, color=False, log=print):
     if color:
         try:
             import worker_color as wc
-            color_factory = wc.make_window_sampler
+            color_factory = wc.make_sampler_for
             wc.reset_screen_cache()  # 番割が動いている場合に備え採色キャッシュを更新
         except Exception as e:
             log(f"色採取モジュールを読み込めませんでした(色判定なしで続行): {e}")
