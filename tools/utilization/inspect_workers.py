@@ -93,7 +93,8 @@ def main():
         w("#" * 78)
         w(f"# {office}  {date_iso}   (採色方式: {sampler.mode})")
         w("#" * 78)
-        w(f"{'顧客':<16}{'現場':<18}{'氏名':<9}{'バッジ':<8}{'背景色':<9}車両")
+        w(f"{'顧客':<16}{'現場':<16}{'氏名':<9}{'バッジ':<7}{'背景色':<9}"
+          f"{'採色域(L,T,R,B)':<22}車")
         w("-" * 78)
 
         for cust, site, name, badge, rect, is_sb, has_v in hr.iter_board_workers(root):
@@ -104,8 +105,9 @@ def main():
                 got += 1
             else:
                 miss += 1
-            w(f"{cust[:14]:<16}{site[:16]:<18}{name[:7]:<9}"
-              f"{badge[:6]:<8}{(bg_hex or '-----'):<9}{vflag}")
+            rstr = ",".join(str(int(v)) for v in rect)
+            w(f"{cust[:14]:<16}{site[:14]:<16}{name[:7]:<9}"
+              f"{badge[:5]:<7}{(bg_hex or '-----'):<9}{rstr:<22}{vflag}")
             rgb = wc.to_rgb(bg_hex)
             if rgb is not None:
                 bg_members[wc.cluster_key(rgb)].append(

@@ -74,33 +74,31 @@ def cluster_key(c):
 
 # ------------------------------------------------------------- 矩形→背景色の推定
 def _bg_from_get(get, rect, step=1, ignore_dark=True):
-    """get(x,y)->(r,g,b)|None を使って、矩形内の最頻色(=背景色)を返す。
+    """get(x,y)->(r,g,b)|None を使って、矩形内の背景色を「チャンネルごとの中央値」で返す。
 
-    ignore_dark=True なら暗い画素(黒い文字・枠線)を除いて数える。番割の背景は
-    白/橙/オレンジ等の明るい色、文字は黒なので、文字グリフに矩形が寄っていても
-    背景の明るい塗りが最頻色として残る(白セルが文字色の黒に化けるのを防ぐ)。
+    背景は領域の過半を占める平らな塗りで、文字(黒・赤など)やバッジ・記号は少数派。
+    最頻色(mode)だと白がアンチエイリアスで多数の淡色に割れて、にじみ色に負けてしまう
+    (白セルがベージュ/灰に化ける)。中央値なら、背景が過半なら文字色や badge 色の
+    外れ値に引きずられず、白なら白・橙なら橙を安定して返す。
     """
     l, t, r, b = rect
     if r - l < 2 or b - t < 2:
         return None
-    counts = defaultdict(int)
+    rs, gs, bs = [], [], []
     yy = t + 1
     while yy < b - 1:
         xx = l + 1
         while xx < r - 1:
             c = get(xx, yy)
             if c is not None:
-                counts[c] += 1
+                rs.append(c[0]); gs.append(c[1]); bs.append(c[2])
             xx += step
         yy += step
-    if not counts:
+    if not rs:
         return None
-    if ignore_dark:
-        # 明るい画素(=背景の塗り)だけで多数決。全部暗ければ諦めて全体で取る。
-        light = {c: n for c, n in counts.items() if max(c) >= 64}
-        if light:
-            counts = light
-    return max(counts, key=lambda k: counts[k])
+    rs.sort(); gs.sort(); bs.sort()
+    m = len(rs) // 2
+    return (rs[m], gs[m], bs[m])
 
 
 # ------------------------------------------------------------------- 採色クラス
