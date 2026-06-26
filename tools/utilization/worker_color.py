@@ -72,8 +72,13 @@ def cluster_key(c):
 
 
 # ------------------------------------------------------------- 矩形→背景色の推定
-def _bg_from_get(get, rect, step=1):
-    """get(x,y)->(r,g,b)|None を使って、矩形内の最頻色(=背景色)を返す。"""
+def _bg_from_get(get, rect, step=1, ignore_dark=True):
+    """get(x,y)->(r,g,b)|None を使って、矩形内の最頻色(=背景色)を返す。
+
+    ignore_dark=True なら暗い画素(黒い文字・枠線)を除いて数える。番割の背景は
+    白/橙/オレンジ等の明るい色、文字は黒なので、文字グリフに矩形が寄っていても
+    背景の明るい塗りが最頻色として残る(白セルが文字色の黒に化けるのを防ぐ)。
+    """
     l, t, r, b = rect
     if r - l < 2 or b - t < 2:
         return None
@@ -89,6 +94,11 @@ def _bg_from_get(get, rect, step=1):
         yy += step
     if not counts:
         return None
+    if ignore_dark:
+        # 明るい画素(=背景の塗り)だけで多数決。全部暗ければ諦めて全体で取る。
+        light = {c: n for c, n in counts.items() if max(c) >= 64}
+        if light:
+            counts = light
     return max(counts, key=lambda k: counts[k])
 
 

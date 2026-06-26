@@ -517,12 +517,15 @@ def build_vehicle_map(records):
 
 
 def worker_cells(block):
-    """1ブロックから (作業員名, 営業所バッジ, 氏名セルの矩形) のリストを返す。
+    """1ブロックから (作業員名, 営業所バッジ, 採色用の矩形) のリストを返す。
 
     番割では作業員の所属営業所が氏名の前のバッジ(蘇我/若松/八幡/都賀/加曽利/宮崎 等)
     で示される。_parse_block の workers はバッジを落とすので、稼働率の営業所判定用に
     ここでバッジ込みで取り出す。氏名セル内の末尾テキスト=氏名、それより前=バッジ。
-    氏名ノードの矩形も返すので、背景色(自社/他社)の採色に使える。
+
+    採色用の矩形は「氏名グリフ」ではなく「氏名セル全体(f)」を返す。グリフ枠だと
+    白背景セルで黒文字が最頻色になり背景を取り違えるため、背景の塗りが広く入る
+    セル矩形を渡す(採色側は暗い画素=文字を除いて最頻色を取る)。
 
     通常現場のブロックは「左=車両/フラグ、右=作業員」なので右半分(mid_x より右)の
     入れ子 Custom セルだけを見る。待機/休み枠は構造が異なる(standby_cells 参照)。
@@ -544,7 +547,7 @@ def worker_cells(block):
         name = _clean_worker_name(last["text"].strip())
         badge = " ".join(t["text"].strip() for t in texts[:-1]).strip()
         if name:
-            out.append((name, badge, last["rect"]))
+            out.append((name, badge, f["rect"]))           # 採色は氏名セル全体で
     return out
 
 
