@@ -36,7 +36,7 @@ KIND_ALIASES = {
     "ignore": KIND_IGNORE, "対象外": KIND_IGNORE, "無視": KIND_IGNORE,
 }
 
-DEFAULT_TOLERANCE = 40  # 背景色がこの距離(R+G+B差の合計)以内なら同じ色とみなす
+DEFAULT_TOLERANCE = 25  # オレンジ度(G−B)がこの差以内なら同じ色とみなす(自社<20/他社>38)
 
 
 # ----------------------------------------------------------------- 色ユーティリティ
@@ -407,12 +407,25 @@ def make_sampler_for(win, root):
 
 
 # ------------------------------------------------------------------- 色→区分マップ
-class ColorMap:
-    """背景色 → 区分(home/other/ignore) を最近傍で判定する。
+def warmth(color):
+    """色の「オレンジ度」= G − B を返す。
 
-    番割の背景色は基本フラットな単色なので、登録色との距離が tolerance 以内なら
-    その区分とみなす。未登録(距離超過)の色は None を返し、呼び出し側が従来の
-    バッジ/名簿判定にフォールバックできるようにする。
+    実機データ(2026-06)で判明: 番割の自社セルは白/灰/桃(=中立色、G≈B)、他社セルは
+    オレンジ系(暖色のグラデで G>B)。採色域が小さく文字のにじみで白が桃/灰に散らばる
+    ため RGB の一致では1色にまとまらないが、G−B で見ると 自社<20 / 他社>38 と完全に
+    分離する。よって背景色の判定は RGB 距離ではなく、この「オレンジ度」で行う。
+    """
+    rgb = to_rgb(color)
+    if rgb is None:
+        return None
+    return rgb[1] - rgb[2]
+
+
+class ColorMap:
+    """背景色 → 区分(home/other/ignore) を「オレンジ度(G−B)」の最近傍で判定する。
+
+    自社=中立色(白/灰/桃, G≈B)・他社=オレンジ(G>B)。登録色それぞれのオレンジ度に
+    最も近い区分を返すので、白が桃や灰に化けても(オレンジ度が低い限り)同じ区分になる。
     """
 
     def __init__(self, entries=None, tolerance=DEFAULT_TOLERANCE):
@@ -424,43 +437,44 @@ class ColorMap:
         return bool(self.entries)
 
     def classify(self, color):
-        """色(hex/rgb) → 'home'/'other'/'ignore'、未登録なら None。"""
-        rgb = to_rgb(color)
-        if rgb is None or not self.entries:
+        """色 → 'home'/'other'/'ignore'。登録色のオレンジ度に最も近いものを採る。"""
+        w = warmth(color)
+        if w is None or not self.entries:
             return None
         best_kind, best_d = None, 10 ** 9
         for crgb, kind, _label in self.entries:
-            d = _dist(rgb, crgb)
+            d = abs((crgb[1] - crgb[2]) - w)   # オレンジ度の差
             if d < best_d:
                 best_d, best_kind = d, kind
-        return best_kind if best_d <= self.tolerance else None
+        return best_kind
 
     def label_of(self, color):
-        """色に最も近い登録色のラベルを返す(なければ '')。"""
-        rgb = to_rgb(color)
-        if rgb is None or not self.entries:
+        """色に最も近い(オレンジ度)登録色のラベルを返す(なければ '')。"""
+        w = warmth(color)
+        if w is None or not self.entries:
             return ""
         best, best_d = "", 10 ** 9
         for crgb, _kind, label in self.entries:
-            d = _dist(rgb, crgb)
+            d = abs((crgb[1] - crgb[2]) - w)
             if d < best_d:
                 best_d, best = d, label or ""
-        return best if best_d <= self.tolerance else ""
+        return best
 
 
 def _merge_clusters(clusters, tol):
-    """近い色クラスタを最頻(最多人数)色へ集約する。
+    """色クラスタを「オレンジ度(G−B)」が近いものへ集約する。
 
-    番割の同じ背景色でも、描画の濃淡で微妙に違う色が複数出る。tol(=許容差)以内の
-    クラスタは同じ色とみなして1つにまとめる。代表色は人数が最多のものを採る。
+    白セルは桃/灰に散らばり RGB ではまとまらないが、オレンジ度(G−B)で見ると自社は
+    すべて低オレンジ度・他社は高オレンジ度に分かれる。tol(=オレンジ度の許容差)以内の
+    クラスタを同じ色とみなして1つにまとめる。代表色は人数が最多のもの。
     """
     out = []
     for c in sorted(clusters, key=lambda x: -x["count"]):
-        crgb = to_rgb(c["hex"])
+        cw = warmth(c["hex"])
         rep = None
-        if crgb is not None:
+        if cw is not None:
             for r in out:
-                if _dist(to_rgb(r["hex"]), crgb) <= tol:
+                if abs(warmth(r["hex"]) - cw) <= tol:
                     rep = r
                     break
         if rep is None:

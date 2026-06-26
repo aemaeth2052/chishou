@@ -423,9 +423,9 @@ class App:
                    command=self._dump_colors).pack(side="left", padx=4)
         ttk.Label(bar, text="  許容差:").pack(side="left")
         cm = WC.load_color_map()
-        self.var_tol = tk.StringVar(value=str(getattr(cm, "tolerance", WC.DEFAULT_TOLERANCE)))
+        self.var_tol = tk.StringVar(value=str(WC.DEFAULT_TOLERANCE))
         ttk.Entry(bar, textvariable=self.var_tol, width=5).pack(side="left")
-        ttk.Label(bar, text="(色が近いと同一視・集約。色が多すぎる時は上げて読み直す)").pack(side="left")
+        ttk.Label(bar, text="(オレンジ度G−Bの許容差。白と橙を分ける。25前後)").pack(side="left")
         ttk.Button(bar, text="保存", command=self._save_colors).pack(side="right")
 
         cols = ("背景色", "区分", "人数", "バッジ", "例(氏名)")
