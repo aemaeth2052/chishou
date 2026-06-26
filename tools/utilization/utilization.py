@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """作業員稼働率の集計(営業所ごと・日次履歴つき)
 
-番割(全作業員)と社員名簿CSVを突き合わせ、各営業所の自営業所作業員の稼働率を出す。
-開いている番割が複数(例: 5営業所)あれば、(営業所, 日付)ごとに別々に集計する。
+番割(全作業員)を読み、各営業所の自営業所作業員の稼働率を出す。開いている番割が
+複数(例: 5営業所)あれば、(営業所, 日付)ごとに別々に集計する。
 
 区分の判定(ユーザー確認済み 2026-06):
-  番割では作業員の所属営業所が氏名前のバッジ(蘇我/若松/八幡/都賀/加曽利/宮崎 等)で
-  示される。これと、その番割の見出しの営業所(=自営業所)と名簿で3区分に分ける。
+  番割では作業員の自社/他社が「氏名セルの背景色」で表示される。この背景色
+  (worker_colors.json)と手動補正(name_aliases.json)だけで3区分に分ける。
+  名簿(CSV)は判定に使わない(任意。在籍数の参考・コード解決にだけ使う)。
 
-    ・自営業所     … バッジが自営業所 or バッジ無し&自営業所の名簿にマッチ
-    ・他営業所応援 … 自営業所以外の営業所バッジが付く人(=他営業所から応援)
-    ・集計対象外   … バッジ無し&自営業所の名簿に無い人(他営業所の自前労務)
+    ・自営業所     … 背景色が「自社」に割り当てた色(例: 白)
+    ・他営業所応援 … 背景色が「他営業所応援」の色
+    ・集計対象外   … 背景色が「対象外」の色
+
+  どの色にも割り当てられていない/採色できなかった人は既定で対象外にし、確認に出す。
 
   外貨を産む現場 = 顧客名に除外キーワード(既定: 第一元商 / 宮崎興業)を含まない現場。
   管理費(送迎応援・寮清掃など)は分子から外す。
@@ -20,23 +23,17 @@
   稼働率 = 分子 ÷ 分母
 
   ・番割の「待機」「休み」枠の人も分母に入れる(番割に名前があるため)。ただし
-    外貨にも管理費にも入れない(分母内・非稼働)。
-  ・名簿(CSV)にいても番割に名前がどこにも無ければ分母に入れない(=出勤していない)。
-  ・自社タグ(自営業所バッジ)が付けば名簿に無くても無条件で自社として計上する
-    (同時に確認推奨にも出し、コードを当てれば名簿照合済みになる)。
+    外貨にも管理費にも入れない(分母内・非稼働)。待機/休み枠はこの営業所の自前要員
+    なので、背景色に関係なく自営業所として分母に算入する。
   他営業所応援は「借りた人工」として別集計。集計対象外はカウントしない。
 
-名簿CSVについて:
-  全営業所を1ファイルにまとめた名簿を渡せば、各番割の見出しの営業所で自動的に
-  絞り込む(名簿の「営業所」列で判定)。1営業所ぶんだけの名簿でも、その営業所の
-  番割に対しては正しく動く。
-
 使い方:
-  # Hks の番割予定表(複数可)を開いた状態で、名簿CSVを指定して実行
-  python utilization.py --roster 名簿.csv
+  # Hks の番割予定表(複数可)を開いた状態で実行(名簿は任意)
+  python utilization.py
+  python utilization.py --roster 名簿.csv   # 在籍数の参考が欲しいとき
 
   # 番割を読まずに、インスペクタ出力(workers_inspect.txt)から再計算(検証用)
-  python utilization.py --roster 名簿.csv --inspect workers_inspect.txt
+  python utilization.py --inspect workers_inspect.txt
 """
 
 import argparse
@@ -203,25 +200,29 @@ def suggest_roster(name, subset, limit=3):
 
 
 class Matcher:
-    """ある営業所(home)について、番割の (表示名, バッジ, 背景色) → 区分 を判定する。
+    """ある営業所(home)について、番割の (表示名, 背景色) → 区分 を判定する。
 
     区分: 'home'(自営業所) / 'other'(他営業所応援) / 'ignore'(集計対象外)
 
-    判定の優先順位(ハイブリッド):
-      1. 手動補正(name_aliases)        … 最優先
-      2. 氏名セルの背景色(worker_colors) … 色が登録済みなら主判定
-      3. バッジ＋名簿CSV(従来)          … 色が未登録/未採取のときのフォールバック兼裏取り
+    判定は **氏名セルの背景色(worker_colors) と手動補正(name_aliases) だけ** で行う。
+    名簿(CSV)は判定に使わない。優先順位:
+      1. 手動補正(name_aliases) … 最優先
+      2. 氏名セルの背景色(worker_colors)
 
-    色と従来判定(他営業所バッジ or 名簿一致)が食い違う行は備考に印を付け、確認に回す。
+    色が未割当・採色できなかった人は既定で「対象外」にし、備考で確認を促す
+    (本当は自社の白セルなら『色判定』タブで色を登録すれば拾える)。
+
+    名簿(任意)を渡した場合は、自社と判定した人の名簿コードを参考に解決するだけに使う
+    (在籍数の参考・対照表のコード表示用。判定そのものには影響しない)。
     """
 
-    def __init__(self, home_key, roster_subset, aliases=None, colormap=None):
+    def __init__(self, home_key, roster_subset=None, aliases=None, colormap=None):
         self.home = home_key
         self.aliases = aliases or {}
         self.colormap = colormap        # worker_color.ColorMap or None
-        self.full = {}       # 正規化フルネーム -> code
+        self.full = {}       # 正規化フルネーム -> code (名簿があれば。参考用)
         self.kana_tok = {}   # 外国人カナトークン -> code
-        for e in roster_subset:
+        for e in (roster_subset or []):
             self.full.setdefault(_norm(e.name), e.code)
             toks = [t for t in re.split(r"[　 ]+", e.name.strip()) if len(t) >= 2]
             toks += [t for t in e.furi.split() if len(t) >= 2]
@@ -230,6 +231,7 @@ class Matcher:
                     self.kana_tok.setdefault(_norm(t), e.code)
 
     def in_roster(self, name):
+        """名簿コードを参考解決する(判定には使わない)。無ければ None。"""
         n = _norm(name)
         if n in self.full:
             return self.full[n]
@@ -237,20 +239,8 @@ class Matcher:
             return self.kana_tok[n]
         return None
 
-    def _badge_roster(self, name, badge):
-        """従来判定: バッジ＋名簿 から (区分, 名簿コード) を返す。"""
-        bo = office_key(badge)
-        if bo and bo != self.home:
-            return "other", None          # 他営業所バッジ → 他営業所応援
-        code = self.in_roster(name)
-        if bo == self.home and bo:
-            return "home", code           # 自営業所バッジ(名簿外でも自営業所)
-        if code:
-            return "home", code           # バッジ無し&名簿○ → 自営業所
-        return "ignore", None             # バッジ無し&名簿× → 他営業所の自前労務
-
     def classify(self, name, badge="", bg=""):
-        """(区分, 名簿コード, 備考) を返す。備考は確認用の判定根拠/不一致メモ。"""
+        """(区分, 名簿コード, 備考) を返す。色(+手動補正)だけで判定する。"""
         if name in self.aliases:  # 手動補正が最優先
             v = self.aliases[name]
             if v in ("other", "他営業所", "応援"):
@@ -259,20 +249,17 @@ class Matcher:
                 return "ignore", None, "手動:対象外"
             return "home", v, "手動:自社"
 
-        badge_kind, code = self._badge_roster(name, badge)
-        color_kind = self.colormap.classify(bg) if self.colormap else None
-        if color_kind:
-            # 従来判定が確定的(他営業所バッジ or 名簿一致)なのに色と食い違う→不一致を記録
-            decisive = bool(office_key(badge)) or code is not None
-            if decisive and badge_kind != color_kind:
-                note = f"色={color_kind}/従来={badge_kind} 不一致"
-            else:
-                note = f"色判定:{color_kind}"
-            if color_kind == "home":
-                return "home", code, note   # 色は自社。名簿コードがあれば付ける
-            return color_kind, None, note
-        # 色が無い/未登録 → 従来(バッジ＋名簿)で判定
-        return badge_kind, code, ""
+        ck = self.colormap.classify(bg) if self.colormap else None
+        if ck == "home":
+            return "home", self.in_roster(name), "色:自社"
+        if ck == "other":
+            return "other", None, "色:他営業所応援"
+        if ck == "ignore":
+            return "ignore", None, "色:対象外"
+        # 色が未割当 / 採色できず → 既定は対象外(確認に出す)
+        if bg:
+            return "ignore", None, "色未割当→対象外"
+        return "ignore", None, "採色できず→対象外"
 
 
 # --------------------------------------------------------------------- 集計
@@ -287,14 +274,14 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
     """1つの番割(office, date)の稼働率レポートを返す。
 
     rows:   [{customer, site, worker, badge, bg}]
-    roster: 名簿全体(Employee)。この営業所ぶんに絞って使う。
+    roster: 名簿(任意・参考用)。在籍数の参考と名簿コードの解決にだけ使う(判定には使わない)。
     staff:  事務所スタッフ等のキー集合(コード/正規化氏名)。番割に出ないなら分母から除く。
-    colormap: worker_color.ColorMap。氏名の背景色で自社/他社を主判定する(無ければ従来判定)。
+    colormap: worker_color.ColorMap。氏名の背景色で自社/他社を判定する(これが主判定)。
     """
     staff = staff or set()
     home = office_key(office)
-    subset = [e for e in roster if e.office == home]
-    roster_missing = not subset  # この営業所の名簿が無い(別営業所のみ渡された等)
+    subset = [e for e in (roster or []) if e.office == home]
+    colormap_empty = not colormap   # 色判定が未設定(=ほぼ全員が対象外になる)
     matcher = Matcher(home, subset, aliases, colormap)
 
     home_on, home_rev, home_ovh = set(), set(), set()
@@ -354,20 +341,16 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
                         "badge": badge, "bg": bg, "kind": label, "field": field,
                         "note": cnote, "customer": cust, "site": site})
 
-        # 取りこぼし候補: 自社かもしれないのに対象外/名簿未照合になっている人、
-        # および 色と従来判定が食い違う人。日本人フルネームは確実に一致するので、
-        # 名簿未照合の対象はカナ(外国人)と自社タグ/色未照合のみ。
+        # 取りこぼし候補: 背景色が色設定に無い/採色できなかった人(既定で対象外に落ちている)。
+        # 本当は自社の白セルなら『色判定』タブで色を登録すれば拾える。意図して対象外の色
+        # (橙/オレンジ)に割り当てた人は出さない。
         reason = None
-        if "不一致" in cnote:
-            reason = ("要確認", f"判定:{label}",
-                      f"色と従来(バッジ/名簿)が不一致({cnote})。"
-                      "色設定 or name_aliases.json で確定させてください")
-        elif kind == "ignore" and _is_kana(worker):
-            reason = ("要確認", "対象外(他営業所自前)",
-                      "自社の外国人かも→ name_aliases.json にコードを書けば自社に算入")
-        elif kind == "home" and code is None:
-            reason = ("確認推奨", "自社(名簿未照合)",
-                      "自社タグだが名簿に無い→ name_aliases.json にコード指定を推奨")
+        if "未割当" in cnote:
+            reason = ("要確認", "対象外(色未割当)",
+                      f"背景色 {bg or '不明'} が色設定に無い→『色判定』タブで割り当てを")
+        elif "採色できず" in cnote and not is_standby:
+            reason = ("要確認", "対象外(採色失敗)",
+                      "背景色が取れなかった→番割を全表示にして再集計を")
         if reason and worker not in review:
             review[worker] = {"priority": reason[0], "office": office, "date": date,
                               "worker": worker, "badge": badge, "bg": bg,
@@ -395,7 +378,7 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
 
     return {
         "office": office, "date": date,
-        "roster_missing": roster_missing,
+        "colormap_empty": colormap_empty,
         "roster_size": roster_size,
         "denominator": denominator, "present": present,
         "revenue": num, "overhead_only": ovh_only,
@@ -416,15 +399,14 @@ def render_board(r):
     L.append("=" * 66)
     L.append(f"作業員稼働率  {r['office']}  {r['date']}")
     L.append("=" * 66)
-    if r.get("roster_missing"):
-        L.append("⚠ この営業所の名簿が読み込まれていません。"
-                 "稼働率は不正確です(その営業所の名簿CSVを渡してください)。")
+    if r.get("colormap_empty"):
+        L.append("⚠ 色判定が未設定です。氏名の背景色で自社/他社を判定するため、"
+                 "『色判定』タブで白=自社などの色を登録してください(未設定だと全員対象外)。")
         L.append("-" * 66)
     rate = r["rate"] * 100
     L.append(f"★ 稼働率 = 外貨現場 {r['revenue']} ÷ 分母(出勤) {r['denominator']} "
              f"= {rate:.1f}%")
-    L.append(f"   (分母 = 番割に名前のある自社。待機/休み枠も含む。"
-             f"名簿在籍 {r['roster_size']} 名)")
+    L.append(f"   (分母 = 番割に名前のある自社(背景色=自社)。待機/休み枠も含む)")
     L.append("-" * 66)
     L.append("【自営業所 内訳(分母の中身)】")
     L.append(f"  外貨を産む現場  : {r['revenue']:>4} 名  ← 稼働(分子)")
@@ -434,7 +416,6 @@ def render_board(r):
     L.append(f"  管理費現場      : {r['overhead_only']:>4} 名  {r['overhead_names']}")
     L.append(f"  待機・休み枠    : {r['standby']:>4} 名  (番割の待機/休み。分母に算入・非稼働)")
     L.append(f"  出勤(=分母)合計 : {r['present']:>4} 名")
-    L.append(f"  (参考)番割に名前なし: {r['absent']:>4} 名  (名簿在籍だが番割に無し。分母外)")
     L.append("")
     L.append("【他営業所からの応援(借りた人工)・別集計】")
     L.append(f"  実人数          : {r['other_total']:>4} 名  "
@@ -505,16 +486,18 @@ def staff_set(lst):
     return s
 
 
-def analyze(roster_paths, inspect_path=None, cust_kw=None, site_kw=None,
+def analyze(roster_paths=None, inspect_path=None, cust_kw=None, site_kw=None,
             aliases=None, staff=None, select=None, colormap=None, log=print):
-    """名簿と番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。
+    """番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。
+
+    判定は氏名の背景色(worker_colors)で行う。名簿(roster_paths)は任意で、渡せば
+    在籍数の参考と名簿コードの解決にだけ使う(判定には影響しない)。
 
     select: None なら開いている全番割を集計。(営業所, 日付) のタプル集合を渡すと、
             その番割だけを集計する(inspect_path 指定時は無視)。
-    colormap: worker_color.ColorMap。None なら worker_colors.json を読む。色が登録
-            されていれば氏名の背景色で自社/他社を主判定する。
+    colormap: worker_color.ColorMap。None なら worker_colors.json を読む。
     """
-    roster = load_rosters(roster_paths, active_only=True)
+    roster = load_rosters(roster_paths, active_only=True) if roster_paths else []
     if aliases is None:
         aliases = load_aliases()
     if colormap is None:
@@ -684,9 +667,9 @@ def write_outputs(reports, out_path=None, csv_path=None,
 
 def main():
     ap = argparse.ArgumentParser(description="作業員稼働率の集計(営業所ごと)")
-    ap.add_argument("--roster", required=True, nargs="+",
-                    help="社員名簿CSV(Shift-JIS)。営業所ごとに複数指定可。"
-                         "フォルダを渡すと中の*.csvを全部読む")
+    ap.add_argument("--roster", nargs="*", default=None,
+                    help="(任意)社員名簿CSV(Shift-JIS)。判定は背景色で行うので必須ではない。"
+                         "渡すと在籍数の参考・名簿コード解決に使う。フォルダ可")
     ap.add_argument("--inspect", help="workers_inspect.txt から計算(指定時は番割を読まない)")
     ap.add_argument("--exclude", nargs="*", default=None,
                     help="外貨を産まない顧客キーワード(部分一致)。指定時は設定ファイルより優先")

@@ -92,7 +92,7 @@ class App:
     # ----------------------------------------------------------- 集計タブ
     def _build_run(self):
         f = self.tab_run
-        top = ttk.LabelFrame(f, text="社員名簿(営業所ごとのCSV、またはフォルダ)")
+        top = ttk.LabelFrame(f, text="社員名簿(任意・参考用。判定は『色判定』タブの背景色で行う)")
         top.pack(fill="x", padx=8, pady=6)
         self.lst_roster = tk.Listbox(top, height=4)
         self.lst_roster.pack(side="left", fill="both", expand=True, padx=6, pady=6)
@@ -160,9 +160,15 @@ class App:
 
     def _run_live(self):
         # 開いている番割を列挙し、対象を選ばせてから集計する
-        if not self.roster_paths:
-            messagebox.showwarning("名簿が未指定", "先に社員名簿を追加してください。")
-            return
+        # 判定は背景色で行うので名簿は任意。色設定が無い場合だけ注意を促す。
+        if not WC.load_color_map():
+            if not messagebox.askokcancel(
+                    "色判定が未設定",
+                    "氏名の背景色で自社/他社を判定しますが、色がまだ設定されていません。\n"
+                    "このままだと全員が対象外になります。\n\n"
+                    "先に『色判定』タブで色を登録するのがおすすめです。"
+                    "このまま続けますか?"):
+                return
         self.btn_run.config(state="disabled")
         self._logmsg("開いている番割予定表を確認しています...")
 
@@ -244,9 +250,7 @@ class App:
         dlg.protocol("WM_DELETE_WINDOW", on_cancel)
 
     def _start_compute(self, inspect_path=None, select=None):
-        if not self.roster_paths:
-            messagebox.showwarning("名簿が未指定", "先に社員名簿を追加してください。")
-            return
+        # 名簿は任意(判定は背景色)。roster_paths が空でも集計できる。
         self.btn_run.config(state="disabled")
         self._logmsg("集計を開始します...")
         # 最新の対照表・除外設定を読み直して使う
