@@ -408,7 +408,7 @@ class App:
         cm = WC.load_color_map()
         self.var_tol = tk.StringVar(value=str(getattr(cm, "tolerance", WC.DEFAULT_TOLERANCE)))
         ttk.Entry(bar, textvariable=self.var_tol, width=5).pack(side="left")
-        ttk.Label(bar, text="(色が近いと同一視。番割の色は単色なので40前後)").pack(side="left")
+        ttk.Label(bar, text="(色が近いと同一視・集約。色が多すぎる時は上げて読み直す)").pack(side="left")
         ttk.Button(bar, text="保存", command=self._save_colors).pack(side="right")
 
         cols = ("背景色", "区分", "人数", "バッジ", "例(氏名)")
@@ -463,12 +463,16 @@ class App:
 
     def _scan_colors(self):
         self.btn_color_scan.config(state="disabled")
-        self._color_log("開いている番割を採色しています...")
+        try:
+            tol = int(self.var_tol.get())
+        except ValueError:
+            tol = WC.DEFAULT_TOLERANCE
+        self._color_log(f"開いている番割を採色しています...(許容差 {tol} で色を集約)")
 
         def work():
             try:
                 clusters = WC.scan_open_boards(
-                    log=lambda s: self.q.put(("colorlog", s)))
+                    tolerance=tol, log=lambda s: self.q.put(("colorlog", s)))
                 self.q.put(("colors", clusters))
             except Exception as e:
                 self.q.put(("colorerr", str(e)))

@@ -450,10 +450,38 @@ class ColorMap:
         return best if best_d <= self.tolerance else ""
 
 
-def scan_open_boards(select=None, log=print):
+def _merge_clusters(clusters, tol):
+    """近い色クラスタを最頻(最多人数)色へ集約する。
+
+    番割の同じ背景色でも、描画の濃淡で微妙に違う色が複数出る。tol(=許容差)以内の
+    クラスタは同じ色とみなして1つにまとめる。代表色は人数が最多のものを採る。
+    """
+    out = []
+    for c in sorted(clusters, key=lambda x: -x["count"]):
+        crgb = to_rgb(c["hex"])
+        rep = None
+        if crgb is not None:
+            for r in out:
+                if _dist(to_rgb(r["hex"]), crgb) <= tol:
+                    rep = r
+                    break
+        if rep is None:
+            out.append({"hex": c["hex"], "count": c["count"],
+                        "badges": set(c["badges"]), "names": list(c["names"])})
+        else:
+            rep["count"] += c["count"]
+            rep["badges"] |= set(c["badges"])
+            for n in c["names"]:
+                if len(rep["names"]) < 12:
+                    rep["names"].append(n)
+    return out
+
+
+def scan_open_boards(select=None, tolerance=DEFAULT_TOLERANCE, log=print):
     """開いている番割を採色し、背景色クラスタの一覧を返す(GUI 色判定タブ用)。
 
     select: None なら開いている全番割。(営業所, 日付) のタプル集合で絞り込める。
+    tolerance: この距離以内の色は同じ背景色として1つに集約する(許容差)。
 
     Returns: [{"hex","count","badges":[...],"names":[...]}] を人数の多い順に。
     """
@@ -518,11 +546,13 @@ def scan_open_boards(select=None, log=print):
                 "画面の拡大率が100%超の可能性。GUIを再起動すると改善することがあります"
                 "(起動時にDPI対応を有効化)。改善しなければ番割を最前面・全表示で再試行を。")
 
+    raw = len(clusters)
+    merged = _merge_clusters(list(clusters.values()), tolerance)
     out = [{"hex": c["hex"], "count": c["count"],
             "badges": sorted(c["badges"]), "names": c["names"]}
-           for c in clusters.values()]
+           for c in merged]
     out.sort(key=lambda x: -x["count"])
-    log(f"色スキャン完了: {len(out)} 色クラスタ")
+    log(f"色スキャン完了: {len(out)} 色(生 {raw} 色を許容差 {tolerance} で集約)")
     return out
 
 
