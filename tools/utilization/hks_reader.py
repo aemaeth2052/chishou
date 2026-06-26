@@ -523,9 +523,10 @@ def worker_cells(block):
     で示される。_parse_block の workers はバッジを落とすので、稼働率の営業所判定用に
     ここでバッジ込みで取り出す。氏名セル内の末尾テキスト=氏名、それより前=バッジ。
 
-    採色用の矩形は「氏名グリフ」ではなく「氏名セル全体(f)」を返す。グリフ枠だと
-    白背景セルで黒文字が最頻色になり背景を取り違えるため、背景の塗りが広く入る
-    セル矩形を渡す(採色側は暗い画素=文字を除いて最頻色を取る)。
+    採色用の矩形は「氏名そのもの(末尾テキスト)」の矩形を返す。セル全体(f)だと氏名の
+    左にあるバッジや装飾の色を拾って背景を取り違える(自社の白が橙に化ける)ため、
+    氏名の矩形に限定する。黒い文字は採色側が ignore_dark で除外するので、氏名の真下の
+    背景の塗りが最頻色として残る。
 
     通常現場のブロックは「左=車両/フラグ、右=作業員」なので右半分(mid_x より右)の
     入れ子 Custom セルだけを見る。待機/休み枠は構造が異なる(standby_cells 参照)。
@@ -547,7 +548,7 @@ def worker_cells(block):
         name = _clean_worker_name(last["text"].strip())
         badge = " ".join(t["text"].strip() for t in texts[:-1]).strip()
         if name:
-            out.append((name, badge, f["rect"]))           # 採色は氏名セル全体で
+            out.append((name, badge, last["rect"]))        # 採色は氏名の矩形だけで
     return out
 
 
