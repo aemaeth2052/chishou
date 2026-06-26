@@ -477,6 +477,12 @@ class App:
 
     def _on_colors(self, clusters):
         self.btn_color_scan.config(state="normal")
+        # 採色中に番割を前面化したので、結果が出たら本アプリを前面に戻す
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
         # 既存マップで分かる色は区分を引き継いで初期表示する
         cm = WC.load_color_map()
         for i in self.tree_color.get_children():

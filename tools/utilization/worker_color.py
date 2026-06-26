@@ -18,6 +18,7 @@ from collections import defaultdict
 from ctypes import wintypes
 from pathlib import Path
 import json
+import time
 
 HERE = Path(__file__).resolve().parent
 COLORS_PATH = HERE / "worker_colors.json"
@@ -353,15 +354,48 @@ def _sampler_hits(sampler, rects):
     return any(sampler.bg(r) for r in rects)
 
 
+def _raise_window(win):
+    """番割ウィンドウを前面に出す(画面キャプチャ採色を正確にするため)。"""
+    hwnd = getattr(win, "handle", None)
+    if not hwnd:
+        return
+    try:
+        win.set_focus()   # pywinauto。前面化の各種トリック込み
+    except Exception:
+        pass
+    try:
+        user32 = ctypes.windll.user32
+        user32.BringWindowToTop(int(hwnd))
+        user32.SetForegroundWindow(int(hwnd))
+    except Exception:
+        pass
+    time.sleep(0.18)      # 前面化後の再描画を待つ
+
+
 def make_sampler_for(win, root):
     """win＋番割ツリーから最適な採色器を選ぶ。
 
-    PrintWindow を試し、氏名セルを実際に数点サンプルして色が取れるか検証する。
-    取れなければ(座標系のズレ/PrintWindow が描けない等)画面キャプチャ採色に切替える。
-    どちらでも取れない場合も画面採色を返す(集計は色なしで続行できる)。
+    1) ウィンドウを前面に出して画面キャプチャで採色(最も正確。実際に表示されている
+       色＝ユーザーが見ている白/橙/オレンジをそのまま読む)。
+    2) 取れなければ PrintWindow(隠れていても撮れるが、このアプリでは白セル等の描画が
+       再現されないことがある)。
+    3) どちらも駄目なら共有スクリーン採色を返す(集計は色なしで続行できる)。
+
+    氏名セルを数点サンプルして実際に色が取れるかで採否を判定する。
     """
     _set_dpi_aware()
     rects = _sample_rects(root)
+
+    # 1) 前面化 + 画面キャプチャ(最も正確)
+    try:
+        _raise_window(win)
+        s = ScreenSampler()              # 前面化後に撮り直す(キャッシュは使わない)
+        if _sampler_hits(s, rects):
+            return s
+    except Exception:
+        pass
+
+    # 2) フォールバック: PrintWindow
     try:
         hwnd = getattr(win, "handle", None)
         if hwnd:
@@ -370,6 +404,7 @@ def make_sampler_for(win, root):
                 return ws
     except Exception:
         pass
+
     return _shared_screen()
 
 
