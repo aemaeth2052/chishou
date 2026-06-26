@@ -294,9 +294,20 @@ class App:
                     self._color_log(payload)
                 elif kind == "colors":
                     self._on_colors(payload)
+                elif kind == "colorlift":
+                    try:
+                        self.root.lift()
+                        self.root.focus_force()
+                    except Exception:
+                        pass
                 elif kind == "colorerr":
                     self._color_log("エラー: " + payload)
                     self.btn_color_scan.config(state="normal")
+                    try:
+                        self.root.lift()
+                        self.root.focus_force()
+                    except Exception:
+                        pass
                 elif kind == "gslog":
                     self._gslog(payload)
                 elif kind == "error":
@@ -408,6 +419,8 @@ class App:
         self.btn_color_scan = ttk.Button(bar, text="番割の色を読み取る",
                                          command=self._scan_colors)
         self.btn_color_scan.pack(side="left")
+        ttk.Button(bar, text="詳細を書き出す",
+                   command=self._dump_colors).pack(side="left", padx=4)
         ttk.Label(bar, text="  許容差:").pack(side="left")
         cm = WC.load_color_map()
         self.var_tol = tk.StringVar(value=str(getattr(cm, "tolerance", WC.DEFAULT_TOLERANCE)))
@@ -478,6 +491,21 @@ class App:
                 clusters = WC.scan_open_boards(
                     tolerance=tol, log=lambda s: self.q.put(("colorlog", s)))
                 self.q.put(("colors", clusters))
+            except Exception as e:
+                self.q.put(("colorerr", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _dump_colors(self):
+        path = str(HERE / "workers_inspect.txt")
+        self._color_log("作業員ごとの背景色・採色域を書き出しています...")
+
+        def work():
+            try:
+                n = WC.dump_details(path, log=lambda s: self.q.put(("colorlog", s)))
+                self.q.put(("colorlog", f"完了: {n} 名を {path} に書き出しました。"
+                            "このファイルを共有してください。"))
+                self.q.put(("colorlift", None))
             except Exception as e:
                 self.q.put(("colorerr", str(e)))
 

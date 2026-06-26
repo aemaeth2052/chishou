@@ -554,6 +554,59 @@ def scan_open_boards(select=None, tolerance=DEFAULT_TOLERANCE, log=print):
     return out
 
 
+def dump_details(path, select=None, log=print):
+    """開いている番割を採色し、作業員1人ごとの (氏名・バッジ・背景色・採色域) を
+    ファイルに書き出す(診断用)。返り値は人数。
+
+    GUI の『色判定』タブの『詳細を書き出す』から呼ぶ。色が想定どおり読めない人の
+    採色域が隣のセルにはみ出していないか等を、この出力で確認できる。
+    """
+    import hks_reader as hr
+    _set_dpi_aware()
+    reset_screen_cache()
+    metas = hr.enumerate_windows()
+    if select is not None:
+        wanted = {tuple(k) for k in select}
+        metas = [m for m in metas if hr.board_key(m) in wanted]
+    if not metas:
+        raise RuntimeError("番割予定表ウィンドウが見つかりません。Hksで表示してください。")
+
+    lines = ["# 作業員ごとの背景色と採色域(診断用)",
+             "# 氏名\tバッジ\t背景色\t採色域(L,T,R,B)\t顧客\t現場"]
+    total = 0
+    for m in metas:
+        win = m["win"]
+        office = m.get("office", "") or "営業所不明"
+        date = m.get("date", "") or "日付不明"
+        pane = None
+        for c in win.children():
+            try:
+                if c.element_info.control_type == "Pane":
+                    pane = c
+                    break
+            except Exception:
+                continue
+        if pane is None:
+            continue
+        try:
+            root = hr._snap_cached(pane)
+        except Exception:
+            root = hr._snap(pane)
+        sampler = make_sampler_for(win, root)
+        lines.append(f"\n## {office}  {date}  (採色 {sampler.mode})")
+        n = 0
+        for cust, site, name, badge, rect, _sb, _hv in hr.iter_board_workers(root):
+            bg = sampler.bg(rect)
+            rstr = ",".join(str(int(v)) for v in rect)
+            lines.append(f"{name}\t{badge}\t{bg or '-----'}\t{rstr}\t{cust}\t{site}")
+            n += 1
+        total += n
+        log(f"  {office} (採色 {sampler.mode}): {n} 名")
+    Path(path).write_text("\n".join(lines), encoding="utf-8")
+    log(f"詳細を書き出しました: {path} ({total} 名)")
+    return total
+
+
 def normalize_kind(v):
     """設定値(home/自社/other/... )を正規キーに。不正なら None。"""
     return KIND_ALIASES.get(str(v).strip().lower()) or KIND_ALIASES.get(str(v).strip())
