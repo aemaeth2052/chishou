@@ -239,8 +239,12 @@ class Matcher:
             return self.kana_tok[n]
         return None
 
-    def classify(self, name, badge="", bg=""):
-        """(区分, 名簿コード, 備考) を返す。色(+手動補正)だけで判定する。"""
+    def classify(self, name, bg=""):
+        """(区分, 名簿コード, 備考) を返す。色(+手動補正)だけで判定する。
+
+        背景色がどの登録色からも許容差を超えて離れている(=未割当)・採色できなかった
+        人は既定で「対象外」にし、備考で区別して要確認に回せるようにする。
+        """
         if name in self.aliases:  # 手動補正が最優先
             v = self.aliases[name]
             if v in ("other", "他営業所", "応援"):
@@ -302,17 +306,17 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
         bg = a.get("bg", "")
         status = a.get("status", "")
         is_standby = bool(status) or cust in STANDBY_LABELS
-        kind, code, cnote = matcher.classify(worker, badge, bg)
-        if is_standby and kind == "ignore":
-            # 待機/休み枠はこの営業所の番割に載っている=自前の要員。バッジ無し&名簿
-            # 未照合(ignore は必ずバッジ無し)でも、この営業所の自社として分母に算入する。
-            # code は None のままなので review(確認推奨)に出して名簿照合を促す。
+        kind, code, cnote = matcher.classify(worker, bg)
+        if is_standby and kind != "home" and not cnote.startswith("手動"):
+            # 待機/休み枠はこの営業所の番割に載っている=自前の要員なので、氏名セルの
+            # 色に関係なく自社として分母に算入する(枠は詰めて表示されるため、隣の
+            # セルや見出しの色を拾ってしまうことがある)。手動補正(name_aliases)だけは
+            # 最優先の契約どおり上書きしない。
             kind = "home"
         key = code or worker
         exc = is_excluded(cust, site, cust_kw, site_kw)
         if kind == "home":
-            # 自社タグ(自営業所バッジ)or 名簿一致 → 無条件で自社として計上。
-            # 名簿未照合(code is None)でも計上し、別途 review(確認推奨)にも出す。
+            # 色=自社(または待機/休み枠・手動補正)。名簿があればコードを参考に付ける。
             home_on.add(key)
             home_name[key] = worker
             if is_standby:
@@ -343,12 +347,15 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
 
         # 取りこぼし候補: 背景色が色設定に無い/採色できなかった人(既定で対象外に落ちている)。
         # 本当は自社の白セルなら『色判定』タブで色を登録すれば拾える。意図して対象外の色
-        # (橙/オレンジ)に割り当てた人は出さない。
+        # (橙/オレンジ)に割り当てた人は出さない。待機/休み枠は色に関係なく自社に算入
+        # されるので確認不要。
         reason = None
-        if "未割当" in cnote:
+        if is_standby:
+            pass
+        elif "未割当" in cnote:
             reason = ("要確認", "対象外(色未割当)",
                       f"背景色 {bg or '不明'} が色設定に無い→『色判定』タブで割り当てを")
-        elif "採色できず" in cnote and not is_standby:
+        elif "採色できず" in cnote:
             reason = ("要確認", "対象外(採色失敗)",
                       "背景色が取れなかった→番割を全表示にして再集計を")
         if reason and worker not in review:
@@ -541,7 +548,6 @@ def assignments_from_hks(select=None, color=False, log=print):
         try:
             import worker_color as wc
             color_factory = wc.make_sampler_for
-            wc.reset_screen_cache()  # 番割が動いている場合に備え採色キャッシュを更新
         except Exception as e:
             log(f"色採取モジュールを読み込めませんでした(色判定なしで続行): {e}")
     return hr.read_all_assignments(select=select, log=log,
@@ -566,38 +572,61 @@ def list_boards(log=print):
     return hr.list_boards(log=log)
 
 
-def assignments_from_inspect(path):
-    """workers_inspect.txt から [{office,date,customer,site,worker,badge}] を復元。
+# 見出し行 '# 営業所  YYYY-MM-DD ...'。日付の後ろに '(採色方式: ...)' 等が付いてもよい
+_INSPECT_HEAD_RE = re.compile(r"^#+\s*(.+?)\s+(\d{4}-\d{2}-\d{2})\b")
+_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_RECT_RE = re.compile(r"^\d+(?:,\d+){3}$")   # 採色域 'L,T,R,B'
 
-    '# 第一元商　宮崎営業所  2026-06-22' の見出し行から営業所・日付を拾う。
+
+def assignments_from_inspect(path):
+    """workers_inspect.txt から [{office,date,customer,site,worker,badge,bg}] を復元。
+
+    2つの形式に対応する(どちらも見出し行 '# 営業所  YYYY-MM-DD ...' で区切られる):
+      ・inspect_workers.bat の一覧
+        …2スペース以上区切り: 顧客  現場  氏名  [バッジ]  [背景色]  [採色域]  [車両印]
+      ・GUI『詳細を書き出す』(worker_color.dump_details) のタブ区切り
+        …氏名\\tバッジ\\t背景色\\t採色域\\t顧客\\t現場
     """
     out = []
     office, date = "", ""
-    head_re = re.compile(r"^#\s*(.+?)\s+(\d{4}-\d{2}-\d{2})\s*$")
     for ln in Path(path).read_text(encoding="utf-8").splitlines():
-        m = head_re.match(ln)
+        m = _INSPECT_HEAD_RE.match(ln)
         if m:
             office, date = m.group(1).strip(), m.group(2)
             continue
-        if ln.startswith(("#", "=", "-", "番割", "顧客", "色取得", "作業員", "※")):
+        if not ln.strip() or ln.startswith(("#", "=", "-", "番割", "顧客", "色取得",
+                                            "作業員", "※")):
             continue
-        parts = re.split(r" {2,}", ln.rstrip())
-        if len(parts) < 3 or not parts[2].strip():
-            continue
-        badge, bg = "", ""
-        for x in parts[3:]:
-            x = x.strip()
-            if not x or x in ("○", "×"):
+        if "\t" in ln:
+            # タブ区切り(dump_details): 氏名 バッジ 背景色 採色域 顧客 現場
+            parts = [p.strip() for p in ln.split("\t")]
+            if len(parts) < 6 or not parts[0]:
                 continue
-            if re.fullmatch(r"#[0-9A-Fa-f]{6}", x):
-                bg = x.upper()           # 背景色(自社/他社の色判定用)
-            else:
-                badge = x
-        cust = parts[0].strip()
+            worker, badge, bg = parts[0], parts[1], parts[2].upper()
+            cust, site = parts[4], parts[5]
+            if not _HEX_RE.match(bg):
+                bg = ""
+        else:
+            # 2スペース以上区切り(inspect_workers): 顧客 現場 氏名 …
+            parts = re.split(r" {2,}", ln.rstrip())
+            if len(parts) < 3 or not parts[2].strip():
+                continue
+            cust, site, worker = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            badge, bg = "", ""
+            for x in parts[3:]:
+                x = x.strip()
+                if not x or x in ("○", "×", "待", "-----"):
+                    continue          # 車両印・待機印・採色不能マーク
+                if _HEX_RE.match(x):
+                    bg = x.upper()    # 背景色(自社/他社の色判定用)
+                elif _RECT_RE.match(x):
+                    continue          # 採色域の座標
+                else:
+                    badge = x
         status = "待機" if "待機" in cust else ("休み" if cust in STANDBY_LABELS else "")
         out.append({"office": office, "date": date,
-                    "customer": cust, "site": parts[1].strip(),
-                    "worker": parts[2].strip(), "badge": badge, "bg": bg,
+                    "customer": cust, "site": site,
+                    "worker": worker, "badge": badge, "bg": bg,
                     "status": status})
     return out
 

@@ -5,16 +5,18 @@
 その背景色を実機の画面から拾い(採色)、`worker_colors.json`(色→区分マップ)で
 自社(home)/他営業所応援(other)/集計対象外(ignore) に対応づける役割を持つ。
 
-採色の主役は **PrintWindow** 方式。番割ウィンドウのビットマップを直接取得するため、
-ウィンドウが最前面でなくても、別ウィンドウに一部隠れていても色を拾える。
-PrintWindow が黒画像しか返さない環境(ハードウェア合成のWPF等)では、従来どおり
-画面全体のスクリーンショット(Pillow / GDI)に自動でフォールバックする。
+採色の主役は「ウィンドウを一瞬前面に出して画面キャプチャ」方式。ユーザーが実際に
+見ている色をそのまま読むため最も正確。氏名セルの色が取れない場合は PrintWindow
+(隠れていても撮れるが、このアプリでは白セルの描画が再現されないことがある)に
+フォールバックする。
+
+判定は色(RGB)の一致ではなく「オレンジ度(G−B)」で行う。実機データ(2026-06)で、
+自社セル=白/灰/桃(G−B < 20)・他社セル=オレンジ系(G−B > 38)と完全分離するため。
 
 このモジュールは inspect_workers / utilization / GUI から共通で使う。
 """
 
 import ctypes
-from collections import defaultdict
 from ctypes import wintypes
 from pathlib import Path
 import json
@@ -36,7 +38,9 @@ KIND_ALIASES = {
     "ignore": KIND_IGNORE, "対象外": KIND_IGNORE, "無視": KIND_IGNORE,
 }
 
-DEFAULT_TOLERANCE = 25  # オレンジ度(G−B)がこの差以内なら同じ色とみなす(自社<20/他社>38)
+# オレンジ度(G−B)の許容差。登録色との差がこれ以内なら同じ色とみなす。
+# 判定(classify)とスキャン時の色集約の両方に効く。実機では自社<20/他社>38。
+DEFAULT_TOLERANCE = 25
 
 
 # ----------------------------------------------------------------- 色ユーティリティ
@@ -63,8 +67,18 @@ def to_rgb(color):
     return None
 
 
-def _dist(a, b):
-    return abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2])
+def warmth(color):
+    """色の「オレンジ度」= G − B を返す。
+
+    実機データ(2026-06)で判明: 番割の自社セルは白/灰/桃(=中立色、G≈B)、他社セルは
+    オレンジ系(暖色のグラデで G>B)。採色域が小さく文字のにじみで白が桃/灰に散らばる
+    ため RGB の一致では1色にまとまらないが、G−B で見ると 自社<20 / 他社>38 と完全に
+    分離する。よって背景色の判定は RGB 距離ではなく、この「オレンジ度」で行う。
+    """
+    rgb = to_rgb(color)
+    if rgb is None:
+        return None
+    return rgb[1] - rgb[2]
 
 
 def cluster_key(c):
@@ -73,14 +87,25 @@ def cluster_key(c):
 
 
 # ------------------------------------------------------------- 矩形→背景色の推定
-def _bg_from_get(get, rect, step=1, ignore_dark=True):
-    """get(x,y)->(r,g,b)|None を使って、矩形内の背景色を「チャンネルごとの中央値」で返す。
+def _median_bg(rs, gs, bs):
+    """チャンネルごとの中央値で背景色を返す。
 
-    背景は領域の過半を占める平らな塗りで、文字(黒・赤など)やバッジ・記号は少数派。
+    背景は領域の過半を占める平らな塗りで、文字(黒・赤など)や記号は少数派。
     最頻色(mode)だと白がアンチエイリアスで多数の淡色に割れて、にじみ色に負けてしまう
-    (白セルがベージュ/灰に化ける)。中央値なら、背景が過半なら文字色や badge 色の
-    外れ値に引きずられず、白なら白・橙なら橙を安定して返す。
+    (白セルがベージュ/灰に化ける)。中央値なら、背景が過半なら文字色の外れ値に
+    引きずられず、白なら白・橙なら橙を安定して返す。
     """
+    if not rs:
+        return None
+    rs = sorted(rs)
+    gs = sorted(gs)
+    bs = sorted(bs)
+    m = len(rs) // 2
+    return (rs[m], gs[m], bs[m])
+
+
+def _bg_from_get(get, rect, step=1):
+    """get(x,y)->(r,g,b)|None を使って、矩形内の背景色(中央値)を返す。"""
     l, t, r, b = rect
     if r - l < 2 or b - t < 2:
         return None
@@ -94,11 +119,7 @@ def _bg_from_get(get, rect, step=1, ignore_dark=True):
                 rs.append(c[0]); gs.append(c[1]); bs.append(c[2])
             xx += step
         yy += step
-    if not rs:
-        return None
-    rs.sort(); gs.sort(); bs.sort()
-    m = len(rs) // 2
-    return (rs[m], gs[m], bs[m])
+    return _median_bg(rs, gs, bs)
 
 
 # ------------------------------------------------------------------- 採色クラス
@@ -169,7 +190,7 @@ class WindowSampler(_BaseSampler):
 
     番割ウィンドウが最前面でなくても、他ウィンドウに一部隠れていても拾えるのが利点。
     取得に失敗(黒画像など)した場合は self.ok=False になるので、呼び出し側で
-    スクリーン採色にフォールバックすること(make_window_sampler が面倒を見る)。
+    スクリーン採色にフォールバックすること(make_sampler_for が面倒を見る)。
     """
 
     mode = "printwindow"
@@ -255,8 +276,8 @@ class ScreenSampler(_BaseSampler):
     """画面全体(仮想スクリーン)のスクリーンショットから色を引く採色器。
 
     Pillow があれば全画面を1回キャプチャ(高速)。無ければ GDI GetPixel(低速)。
-    番割が最前面・全表示でないと、隠れた部分は背面ウィンドウの色を拾ってしまう点に注意。
-    PrintWindow が使えない環境でのフォールバック。
+    番割が最前面・全表示でないと、隠れた部分は背面ウィンドウの色を拾ってしまう点に
+    注意(make_sampler_for が採色前にウィンドウを前面化する)。
     """
 
     def __init__(self):
@@ -284,14 +305,45 @@ class ScreenSampler(_BaseSampler):
                 c = self.px[ix, iy]
                 return (c[0], c[1], c[2])
             return None
-        v = self.gdi.GetPixel(self.hdc, x, y)
-        if v == 0xFFFFFFFF:  # CLR_INVALID
+        # GetPixel は COLORREF(DWORD) を返すが ctypes 既定の c_int だと
+        # CLR_INVALID(0xFFFFFFFF) が -1 になり比較をすり抜けて「白」に化けるので、
+        # 32bit に丸めてから判定する。
+        v = self.gdi.GetPixel(self.hdc, x, y) & 0xFFFFFFFF
+        if v == 0xFFFFFFFF:  # CLR_INVALID (画面外など)
             return None
         return (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
 
+    def bg(self, rect):
+        """氏名セル矩形の背景色。PILキャプチャ時は crop でまとめて読む(高速)。
+
+        採色域はセル全体×人数ぶんあるので、1画素ずつ px[x,y] を呼ぶと数百万回の
+        Pythonループになる。crop→チャンネル分解→C実装のソートで中央値を取れば同じ
+        結果を桁違いに速く出せる。GDIフォールバック時は従来の間引きループ。
+        """
+        if self.mode != "screen-pil":
+            return super().bg(rect)
+        l, t, r, b = rect
+        if r - l < 2 or b - t < 2:
+            return ""
+        # 従来ループと同じく縁1pxを除いた内側を、画像座標に直してクリップ
+        il, it = max(l - self.vx + 1, 0), max(t - self.vy + 1, 0)
+        ir, ib = min(r - self.vx - 1, self.W), min(b - self.vy - 1, self.H)
+        if ir - il < 1 or ib - it < 1:
+            return ""
+        box = self.img.crop((il, it, ir, ib))
+        med = []
+        for ch in box.split()[:3]:
+            data = sorted(ch.getdata())
+            med.append(data[len(data) // 2])
+        return hexc(tuple(med))
+
 
 def _set_dpi_aware():
-    """採色の座標系(物理ピクセル)を UIA の矩形に合わせるため DPI 認識にする。"""
+    """採色の座標系(物理ピクセル)を UIA の矩形に合わせるため DPI 認識にする。
+
+    プロセスの DPI 認識は最初のウィンドウ生成前しか変えられないため、本モジュールの
+    import 時(末尾)に一度だけ呼ぶ。GUI は tk.Tk() より先に本モジュールを import する。
+    """
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE_V2 相当
     except Exception:
@@ -299,38 +351,6 @@ def _set_dpi_aware():
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
-
-
-_SHARED_SCREEN = {"s": None}
-
-
-def _shared_screen():
-    if _SHARED_SCREEN["s"] is None:
-        _SHARED_SCREEN["s"] = ScreenSampler()
-    return _SHARED_SCREEN["s"]
-
-
-def reset_screen_cache():
-    """スクリーンキャプチャのキャッシュを破棄(番割を動かした後に呼ぶ)。"""
-    _SHARED_SCREEN["s"] = None
-
-
-def make_window_sampler(win):
-    """pywinauto のウィンドウから採色器を作る(矩形検証なし・互換用)。
-
-    まず PrintWindow を試し、黒画像など失敗したら共有のスクリーン採色に切り替える。
-    返り値は bg(rect)->'#RRGGBB' を持つ採色器。失敗時も必ず何か返す(最低限スクリーン)。
-    """
-    _set_dpi_aware()
-    try:
-        hwnd = getattr(win, "handle", None)
-        if hwnd:
-            ws = WindowSampler(hwnd)
-            if ws.ok:
-                return ws
-    except Exception:
-        pass
-    return _shared_screen()
 
 
 def _sample_rects(root, limit=10):
@@ -377,19 +397,21 @@ def make_sampler_for(win, root):
        色＝ユーザーが見ている白/橙/オレンジをそのまま読む)。
     2) 取れなければ PrintWindow(隠れていても撮れるが、このアプリでは白セル等の描画が
        再現されないことがある)。
-    3) どちらも駄目なら共有スクリーン採色を返す(集計は色なしで続行できる)。
+    3) どちらも駄目なら 1) のキャプチャをそのまま返す(取れないセルは "" になり
+       「採色できず」として要確認に出る。古いキャプチャの再利用はしない——前のボードを
+       撮った画像で別のボードを採色すると、誤った色を黙って返してしまうため)。
 
     氏名セルを数点サンプルして実際に色が取れるかで採否を判定する。
     """
-    _set_dpi_aware()
     rects = _sample_rects(root)
 
     # 1) 前面化 + 画面キャプチャ(最も正確)
+    screen = None
     try:
         _raise_window(win)
-        s = ScreenSampler()              # 前面化後に撮り直す(キャッシュは使わない)
-        if _sampler_hits(s, rects):
-            return s
+        screen = ScreenSampler()         # 前面化後に撮り直す(キャッシュは使わない)
+        if _sampler_hits(screen, rects):
+            return screen
     except Exception:
         pass
 
@@ -403,62 +425,76 @@ def make_sampler_for(win, root):
     except Exception:
         pass
 
-    return _shared_screen()
+    # 3) 検証は通らなかったが、今撮った画面キャプチャを最後の手段として返す
+    return screen if screen is not None else ScreenSampler()
+
+
+def _iter_selected_boards(select=None, log=print):
+    """開いている番割を (営業所, 日付, ツリー, 採色器) で順に返す共通ジェネレータ。
+
+    scan_open_boards / dump_details / inspect_workers が同じ列挙・Pane探索・採色器
+    選択を共有するための入口。select: None なら全番割。(営業所, 日付) のタプル集合で
+    絞り込み。番割が1つも無ければ RuntimeError。
+    """
+    import hks_reader as hr
+    metas = hr.enumerate_windows()
+    if select is not None:
+        wanted = {tuple(k) for k in select}
+        metas = [m for m in metas if hr.board_key(m) in wanted]
+    if not metas:
+        raise RuntimeError("番割予定表ウィンドウが見つかりません。Hksで表示してください。")
+    for m in metas:
+        office = m.get("office", "") or "営業所不明"
+        date = m.get("date", "") or "日付不明"
+        root = hr.board_root(m["win"], log=log)
+        if root is None:
+            log(f"  {office}: カード領域(Pane)が見つからずスキップ")
+            continue
+        yield office, date, root, make_sampler_for(m["win"], root)
 
 
 # ------------------------------------------------------------------- 色→区分マップ
-def warmth(color):
-    """色の「オレンジ度」= G − B を返す。
-
-    実機データ(2026-06)で判明: 番割の自社セルは白/灰/桃(=中立色、G≈B)、他社セルは
-    オレンジ系(暖色のグラデで G>B)。採色域が小さく文字のにじみで白が桃/灰に散らばる
-    ため RGB の一致では1色にまとまらないが、G−B で見ると 自社<20 / 他社>38 と完全に
-    分離する。よって背景色の判定は RGB 距離ではなく、この「オレンジ度」で行う。
-    """
-    rgb = to_rgb(color)
-    if rgb is None:
-        return None
-    return rgb[1] - rgb[2]
-
-
 class ColorMap:
-    """背景色 → 区分(home/other/ignore) を「オレンジ度(G−B)」の最近傍で判定する。
+    """背景色 → 区分(home/other/ignore) を「オレンジ度(G−B)」で判定する。
 
-    自社=中立色(白/灰/桃, G≈B)・他社=オレンジ(G>B)。登録色それぞれのオレンジ度に
-    最も近い区分を返すので、白が桃や灰に化けても(オレンジ度が低い限り)同じ区分になる。
+    自社=中立色(白/灰/桃, G≈B)・他社=オレンジ(G>B)。登録色のオレンジ度に最も近い
+    区分を返すので、白が桃や灰に化けても(オレンジ度が低い限り)同じ区分になる。
+    どの登録色からも許容差(tolerance)を超えて離れた色は None(=未割当)を返し、
+    呼び出し側が「対象外+要確認」に落とせるようにする。1色しか登録していない状態で
+    未知の色(例: 新しい区分のオレンジ)が黙って自社に化けるのを防ぐ安全弁。
     """
 
     def __init__(self, entries=None, tolerance=DEFAULT_TOLERANCE):
         # entries: [(rgb, kind, label)]
         self.entries = list(entries or [])
         self.tolerance = tolerance
+        self._warm = [(rgb[1] - rgb[2], kind, label or "")
+                      for rgb, kind, label in self.entries]
 
     def __bool__(self):
         return bool(self.entries)
 
-    def classify(self, color):
-        """色 → 'home'/'other'/'ignore'。登録色のオレンジ度に最も近いものを採る。"""
+    def _nearest(self, color):
+        """(オレンジ度の差, 区分, ラベル) の最近傍。判定不能なら None。"""
         w = warmth(color)
-        if w is None or not self.entries:
+        if w is None or not self._warm:
             return None
-        best_kind, best_d = None, 10 ** 9
-        for crgb, kind, _label in self.entries:
-            d = abs((crgb[1] - crgb[2]) - w)   # オレンジ度の差
-            if d < best_d:
-                best_d, best_kind = d, kind
-        return best_kind
+        return min(((abs(ew - w), kind, label) for ew, kind, label in self._warm),
+                   key=lambda x: x[0])
+
+    def classify(self, color):
+        """色 → 'home'/'other'/'ignore'。許容差を超える色・未登録は None。"""
+        n = self._nearest(color)
+        if n is None or n[0] > self.tolerance:
+            return None
+        return n[1]
 
     def label_of(self, color):
-        """色に最も近い(オレンジ度)登録色のラベルを返す(なければ '')。"""
-        w = warmth(color)
-        if w is None or not self.entries:
+        """色に最も近い登録色のラベルを返す(許容差外・未登録なら '')。"""
+        n = self._nearest(color)
+        if n is None or n[0] > self.tolerance:
             return ""
-        best, best_d = "", 10 ** 9
-        for crgb, _kind, label in self.entries:
-            d = abs((crgb[1] - crgb[2]) - w)
-            if d < best_d:
-                best_d, best = d, label or ""
-        return best
+        return n[2]
 
 
 def _merge_clusters(clusters, tol):
@@ -493,40 +529,13 @@ def scan_open_boards(select=None, tolerance=DEFAULT_TOLERANCE, log=print):
     """開いている番割を採色し、背景色クラスタの一覧を返す(GUI 色判定タブ用)。
 
     select: None なら開いている全番割。(営業所, 日付) のタプル集合で絞り込める。
-    tolerance: この距離以内の色は同じ背景色として1つに集約する(許容差)。
+    tolerance: オレンジ度(G−B)の差がこれ以内の色は同じ背景色として1つに集約する。
 
     Returns: [{"hex","count","badges":[...],"names":[...]}] を人数の多い順に。
     """
     import hks_reader as hr
-    _set_dpi_aware()
-    reset_screen_cache()
-    metas = hr.enumerate_windows()
-    if select is not None:
-        wanted = {tuple(k) for k in select}
-        metas = [m for m in metas if hr.board_key(m) in wanted]
-    if not metas:
-        raise RuntimeError("番割予定表ウィンドウが見つかりません。Hksで表示してください。")
-
     clusters = {}  # cluster_key -> dict
-    for m in metas:
-        win = m["win"]
-        office = m.get("office", "") or "営業所不明"
-        pane = None
-        for c in win.children():
-            try:
-                if c.element_info.control_type == "Pane":
-                    pane = c
-                    break
-            except Exception:
-                continue
-        if pane is None:
-            log(f"  {office}: カード領域が見つからずスキップ")
-            continue
-        try:
-            root = hr._snap_cached(pane)
-        except Exception:
-            root = hr._snap(pane)
-        sampler = make_sampler_for(win, root)
+    for office, _date, root, sampler in _iter_selected_boards(select, log):
         n = miss = 0
         first_miss_rect = None
         for _cust, _site, name, badge, rect, _sb, _hv in hr.iter_board_workers(root):
@@ -574,39 +583,13 @@ def dump_details(path, select=None, log=print):
 
     GUI の『色判定』タブの『詳細を書き出す』から呼ぶ。色が想定どおり読めない人の
     採色域が隣のセルにはみ出していないか等を、この出力で確認できる。
+    出力はタブ区切り。utilization.assignments_from_inspect はこの形式も読める。
     """
     import hks_reader as hr
-    _set_dpi_aware()
-    reset_screen_cache()
-    metas = hr.enumerate_windows()
-    if select is not None:
-        wanted = {tuple(k) for k in select}
-        metas = [m for m in metas if hr.board_key(m) in wanted]
-    if not metas:
-        raise RuntimeError("番割予定表ウィンドウが見つかりません。Hksで表示してください。")
-
     lines = ["# 作業員ごとの背景色と採色域(診断用)",
              "# 氏名\tバッジ\t背景色\t採色域(L,T,R,B)\t顧客\t現場"]
     total = 0
-    for m in metas:
-        win = m["win"]
-        office = m.get("office", "") or "営業所不明"
-        date = m.get("date", "") or "日付不明"
-        pane = None
-        for c in win.children():
-            try:
-                if c.element_info.control_type == "Pane":
-                    pane = c
-                    break
-            except Exception:
-                continue
-        if pane is None:
-            continue
-        try:
-            root = hr._snap_cached(pane)
-        except Exception:
-            root = hr._snap(pane)
-        sampler = make_sampler_for(win, root)
+    for office, date, root, sampler in _iter_selected_boards(select, log):
         lines.append(f"\n## {office}  {date}  (採色 {sampler.mode})")
         n = 0
         for cust, site, name, badge, rect, _sb, _hv in hr.iter_board_workers(root):

@@ -410,9 +410,13 @@ def list_boards(log=print):
     return boards
 
 
-def _read_one_window(win, office, date_iso, update_hhmm, update_dt_iso, log):
-    """1ウィンドウぶんのレコードを返す"""
-    label = office or "営業所不明"
+def board_root(win, log=print):
+    """番割ウィンドウのカード領域(Pane)をスナップした辞書ツリーを返す。
+
+    Pane が見つからなければ None(呼び出し側でスキップ処理)。UIAキャッシュの
+    一括読取に失敗したら従来方式(_snap)に自動で切り替える。番割を読む全ツール
+    (本モジュール・worker_color・inspect_workers)がこの入口を共有する。
+    """
     pane = None
     for c in win.children():
         try:
@@ -422,17 +426,24 @@ def _read_one_window(win, office, date_iso, update_hhmm, update_dt_iso, log):
         except Exception:
             continue
     if pane is None:
-        log(f"  {label}: カード領域(Pane)が見つからずスキップしました")
-        return []
-
-    log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'}"
-        f"{' 更新' + update_hhmm if update_hhmm else ''})")
+        return None
     try:
-        root = _snap_cached(pane)
+        return _snap_cached(pane)
     except Exception as e:
         # comtypes/pywinautoのバージョン差などで失敗したら従来方式に切替
-        log(f"  高速読み取りに失敗したため通常方式に切り替えます: {e}")
-        root = _snap(pane)
+        log(f"  高速読取に失敗、通常方式に切替: {e}")
+        return _snap(pane)
+
+
+def _read_one_window(win, office, date_iso, update_hhmm, update_dt_iso, log):
+    """1ウィンドウぶんのレコードを返す"""
+    label = office or "営業所不明"
+    log(f"番割予定表を読み取っています... ({label} {date_iso or '日付不明'}"
+        f"{' 更新' + update_hhmm if update_hhmm else ''})")
+    root = board_root(win, log=log)
+    if root is None:
+        log(f"  {label}: カード領域(Pane)が見つからずスキップしました")
+        return []
     records = []
     current_customer = None
     for child in root["children"]:
@@ -561,11 +572,6 @@ def worker_cells(block):
     return out
 
 
-def worker_badges(block):
-    """1ブロックから (作業員名, 営業所バッジ) のリストを返す(矩形なし・互換用)。"""
-    return [(name, badge) for name, badge, _ in worker_cells(block)]
-
-
 def standby_cells(block):
     """待機/休み枠のブロックから (氏名, バッジ, 氏名の矩形) のリストを返す。
 
@@ -595,11 +601,6 @@ def standby_cells(block):
             badge = " ".join(t["text"].strip() for t in texts[:-1]).strip()
             out.append((name, badge, texts[-1]["rect"]))
     return out
-
-
-def standby_workers(block):
-    """待機/休み枠のブロックから (氏名, バッジ) のリストを返す(矩形なし・互換用)。"""
-    return [(name, badge) for name, badge, _ in standby_cells(block)]
 
 
 def iter_board_workers(root):
@@ -669,22 +670,10 @@ def read_all_assignments(select=None, log=print, color_factory=None):
         win = m["win"]
         office = m.get("office", "")
         date_iso = m.get("date", "")
-        pane = None
-        for c in win.children():
-            try:
-                if c.element_info.control_type == "Pane":
-                    pane = c
-                    break
-            except Exception:
-                continue
-        if pane is None:
+        root = board_root(win, log=log)
+        if root is None:
             log(f"  {office or '営業所不明'}: カード領域(Pane)が見つからずスキップ")
             continue
-        try:
-            root = _snap_cached(pane)
-        except Exception as e:
-            log(f"  高速読取に失敗、通常方式に切替: {e}")
-            root = _snap(pane)
 
         # 採色器はツリー(root)が取れてから用意する(氏名矩形で座標系を検証するため)
         sampler = None

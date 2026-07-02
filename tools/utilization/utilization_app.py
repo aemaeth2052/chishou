@@ -295,23 +295,16 @@ class App:
                 elif kind == "colors":
                     self._on_colors(payload)
                 elif kind == "colorlift":
-                    try:
-                        self.root.lift()
-                        self.root.focus_force()
-                    except Exception:
-                        pass
+                    self._lift_self()
                 elif kind == "colorerr":
                     self._color_log("エラー: " + payload)
                     self.btn_color_scan.config(state="normal")
-                    try:
-                        self.root.lift()
-                        self.root.focus_force()
-                    except Exception:
-                        pass
+                    self._lift_self()
                 elif kind == "gslog":
                     self._gslog(payload)
                 elif kind == "error":
                     self._logmsg("エラー: " + payload)
+                    self._lift_self()
                     messagebox.showerror("集計エラー", payload)
                     self.btn_run.config(state="normal")
                 elif kind == "done":
@@ -321,7 +314,16 @@ class App:
             pass
         self.root.after(120, self._poll)
 
+    def _lift_self(self):
+        """採色で番割ウィンドウを前面化した後、本アプリを前面に戻す。"""
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
     def _on_done(self, reports, review, nchk, nreco):
+        self._lift_self()   # 集計中の採色で番割が前面に出ているので戻す
         for i in self.tree.get_children():
             self.tree.delete(i)
         for r in reports:
@@ -411,7 +413,7 @@ class App:
         ttk.Label(
             f, text="氏名の背景色で自社/他社を判定します。番割を開いて『番割の色を読み取る』を"
             "押し、検出された各色に区分を割り当てて保存してください。"
-            "ここで割り当てた色が集計時の主判定になります(未割当の色はバッジ＋名簿で判定)。"
+            "どの登録色にも当てはまらない色の人は対象外になり、要確認に出ます。"
         ).pack(anchor="w", padx=8, pady=(8, 2))
 
         bar = ttk.Frame(f)
@@ -423,9 +425,11 @@ class App:
                    command=self._dump_colors).pack(side="left", padx=4)
         ttk.Label(bar, text="  許容差:").pack(side="left")
         cm = WC.load_color_map()
-        self.var_tol = tk.StringVar(value=str(WC.DEFAULT_TOLERANCE))
+        self.var_tol = tk.StringVar(
+            value=str(getattr(cm, "tolerance", WC.DEFAULT_TOLERANCE)))
         ttk.Entry(bar, textvariable=self.var_tol, width=5).pack(side="left")
-        ttk.Label(bar, text="(オレンジ度G−Bの許容差。白と橙を分ける。25前後)").pack(side="left")
+        ttk.Label(bar, text="(オレンジ度G−Bの許容差。判定と色の集約の両方に効く。25前後)"
+                  ).pack(side="left")
         ttk.Button(bar, text="保存", command=self._save_colors).pack(side="right")
 
         cols = ("背景色", "区分", "人数", "バッジ", "例(氏名)")
@@ -513,12 +517,7 @@ class App:
 
     def _on_colors(self, clusters):
         self.btn_color_scan.config(state="normal")
-        # 採色中に番割を前面化したので、結果が出たら本アプリを前面に戻す
-        try:
-            self.root.lift()
-            self.root.focus_force()
-        except Exception:
-            pass
+        self._lift_self()   # 採色中に番割を前面化したので、結果が出たら戻す
         # 既存マップで分かる色は区分を引き継いで初期表示する
         cm = WC.load_color_map()
         for i in self.tree_color.get_children():
@@ -546,7 +545,7 @@ class App:
             vals = self.tree_color.item(iid, "values")
             hexv, kindjp = vals[0], vals[1]
             kind = jp2kind.get(kindjp, "")
-            if kind:  # 未設定の色は保存しない(=従来判定にフォールバック)
+            if kind:  # 未設定の色は保存しない(該当者は対象外+要確認になる)
                 colors.append({"hex": hexv, "kind": kind,
                                "label": (vals[3] or "")})
         try:

@@ -150,7 +150,7 @@ python utilization.py --roster roster --inspect workers_inspect.txt   # 検証(�
 | `utilization_app.py` / `.bat` | GUI |
 | `utilization.bat` | CLI起動 |
 | `hks_reader.py` | 番割予定表の読み取り（UI Automation）。`read_all_assignments` で全作業員 |
-| `worker_color.py` | 氏名の背景色の採取（PrintWindow主・画面副）と色→区分マップ |
+| `worker_color.py` | 氏名の背景色の採取（前面化＋画面キャプチャ主・PrintWindow副）と色→区分マップ |
 | `sheets_sync.py` | 履歴をGoogleスプレッドシートへupsert |
 | `inspect_workers.py` / `.bat` | 番割の調査ツール（背景色クラスタ＋設定の雛形を出力） |
 | `name_aliases.example.json` | 対照表のひな型 |
