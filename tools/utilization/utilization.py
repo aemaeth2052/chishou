@@ -431,8 +431,11 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
 
 def render_board(r):
     L = []
+    office = r["office"]
+    if r.get("is_total") and r.get("n_offices"):
+        office = f"{office}({r['n_offices']}営業所)"
     L.append("=" * 66)
-    L.append(f"作業員稼働率  {r['office']}  {r['date']}")
+    L.append(f"作業員稼働率  {office}  {r['date']}")
     L.append("=" * 66)
     if r.get("is_total"):
         L.append("※ 選択した番割の単純合計。営業所間の応援は、貸し手側で自社として"
@@ -503,7 +506,10 @@ def company_totals(reports):
         if len(rs) < 2:
             continue
         t = {k: sum(r[k] for r in rs) for k in sum_keys}
-        t["office"] = f"{COMPANY_TOTAL_LABEL}({len(rs)}営業所)"
+        # 履歴の upsert キーは(日付, 営業所)。選んだ番割の数で名前が変わると同じ日に
+        # 全社行が重複して残るので、名前は固定にし営業所数は別キーで持つ。
+        t["office"] = COMPANY_TOTAL_LABEL
+        t["n_offices"] = len(rs)
         t["date"] = date
         t["is_total"] = True
         t["colormap_empty"] = any(r.get("colormap_empty") for r in rs)
