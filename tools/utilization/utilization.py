@@ -252,6 +252,8 @@ class Matcher:
                 return "other", None, "手動:他営業所"
             if v in ("ignore", "対象外", ""):
                 return "ignore", None, "手動:対象外"
+            if v in ("home", "自社"):   # 名簿コード無しの自社登録(名簿が無い運用向け)
+                return "home", None, "手動:自社"
             return "home", v, "手動:自社"
 
         ck = self.colormap.classify(bg) if self.colormap else None

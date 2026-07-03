@@ -468,8 +468,11 @@ class App:
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(2, 10))
-        ttk.Label(bar, text="選択した作業員を:  割当コード").pack(side="left")
-        self.detail_code = ttk.Entry(bar, width=12)
+        ttk.Label(bar, text="選択した作業員を:  割当先(社員コード・空欄可)").pack(side="left")
+        self.detail_code = ttk.Combobox(bar, width=30)
+        self.detail_code.configure(postcommand=lambda: self.detail_code.configure(
+            values=self._code_options(self.detail_key[0] if self.detail_key else "",
+                                      self.detail_code.get())))
         self.detail_code.pack(side="left", padx=4)
         ttk.Button(bar, text="自社として登録",
                    command=lambda: self._detail_assign("code")).pack(side="left", padx=2)
@@ -515,13 +518,13 @@ class App:
             self.aliases.pop(name, None)
             shown = "削除"
         elif mode == "code":
-            val = self.detail_code.get().strip()
+            val = self._code_from_text(self.detail_code.get())
             if not val:
-                messagebox.showwarning("コード未入力", "割当先のコードを入れてください。",
-                                       parent=self.detail_win)
-                return
+                val = "home"      # コード無しの自社登録
+                shown = "自社(コードなし)"
+            else:
+                shown = f"自社({val})"
             self.aliases[name] = val
-            shown = f"自社({val})"
         else:
             self.aliases[name] = mode
             shown = "他営業所応援" if mode == "other" else "対象外"
@@ -754,8 +757,9 @@ class App:
     # ----------------------------------------------------------- 対照表タブ
     def _build_alias(self):
         f = self.tab_alias
-        ttk.Label(f, text="取りこぼし候補(集計を実行すると表示)。行を選び、"
-                  "割当先コードを確認して下のボタンで登録します。"
+        ttk.Label(f, text="取りこぼし候補(集計を実行すると表示)。行を選び、下のボタンで登録します。\n"
+                  "割当先 = 名簿(Hks)の社員コード。名簿を指定していれば▼から選べます"
+                  "(その番割の営業所の社員が先頭)。名簿が無ければ空欄のまま『自社として登録』も可。"
                   ).pack(anchor="w", padx=8, pady=6)
 
         cols = ("優先", "氏名", "営業所", "バッジ", "現在の判定", "推奨コード候補", "現場")
@@ -774,10 +778,15 @@ class App:
 
         row = ttk.Frame(f)
         row.pack(fill="x", padx=8, pady=4)
-        ttk.Label(row, text="割当先コード:").pack(side="left")
-        self.ent_code = ttk.Entry(row, width=14)
+        ttk.Label(row, text="割当先(社員コード):").pack(side="left")
+        self._alias_board_office = ""
+        self.ent_code = ttk.Combobox(row, width=34)
+        self.ent_code.configure(postcommand=lambda: self.ent_code.configure(
+            values=self._code_options(self._alias_board_office,
+                                      self.ent_code.get())))
         self.ent_code.pack(side="left", padx=4)
         self.ent_code.bind("<KeyRelease>", lambda _e: self._refresh_code_label())
+        self.ent_code.bind("<<ComboboxSelected>>", lambda _e: self._refresh_code_label())
         self.var_code_resolved = tk.StringVar(value="")
         ttk.Label(row, textvariable=self.var_code_resolved, width=30).pack(
             side="left", padx=4)
@@ -793,7 +802,7 @@ class App:
         self.tree_al = ttk.Treeview(cur, columns=("氏名", "割当"), show="headings",
                                     height=7)
         self.tree_al.heading("氏名", text="氏名")
-        self.tree_al.heading("割当", text="割当(コード/other/ignore)")
+        self.tree_al.heading("割当", text="割当(社員コード / home=自社 / other / ignore)")
         self.tree_al.column("氏名", width=200, anchor="w")
         self.tree_al.column("割当", width=260, anchor="w")
         self.tree_al.pack(side="left", fill="both", expand=True, padx=6, pady=6)
@@ -813,16 +822,47 @@ class App:
         except Exception:
             pass  # 名簿が未指定/不正でも対照表自体は使えるようにする
 
+    @staticmethod
+    def _code_option_str(e):
+        return f"{e.code}  {e.name.strip()}（{e.office or '営業所不明'}）"
+
+    @staticmethod
+    def _code_from_text(text):
+        """入力欄のテキストから社員コードを取り出す。
+
+        プルダウン選択なら「コード  氏名（営業所）」形式なので先頭トークン、
+        手入力ならそのままコードとして扱う。
+        """
+        return (text or "").strip().split()[0] if (text or "").strip() else ""
+
+    def _code_options(self, board_office="", query=""):
+        """割当先プルダウンの選択肢(コード 氏名（営業所）)を返す。
+
+        その番割の営業所の社員を先頭に並べる。query(入力途中のテキスト)が
+        あればコード/氏名の部分一致で絞り込む。選択済みの完全な行は絞らない。
+        """
+        q = (query or "").strip()
+        if "（" in q:      # 既に選択済みの表示形式 → 全件を出し直す
+            q = ""
+        bo = U.office_key(board_office)
+        opts_board, opts_rest = [], []
+        for e in self.roster_index.values():
+            s = self._code_option_str(e)
+            if q and q not in s:
+                continue
+            (opts_board if bo and e.office == bo else opts_rest).append(s)
+        return sorted(opts_board) + sorted(opts_rest)
+
     def _code_office(self, code):
         """コードを名簿で解決して Employee を返す(無ければ None)。"""
         return self.roster_index.get((code or "").strip())
 
     def _refresh_code_label(self):
         """入力中のコードを名簿で解決し「→ 氏名(営業所)」をライブ表示。"""
-        code = self.ent_code.get().strip()
+        code = self._code_from_text(self.ent_code.get())
         e = self._code_office(code)
         if not code:
-            self.var_code_resolved.set("")
+            self.var_code_resolved.set("（空欄=コード無しで自社登録）")
         elif e:
             self.var_code_resolved.set(f"→ {e.name.strip()}（{e.office or '営業所不明'}）")
         else:
@@ -834,11 +874,13 @@ class App:
             return
         vals = self.tree_rev.item(sel[0], "values")
         name = vals[1] if len(vals) > 1 else ""
+        self._alias_board_office = vals[2] if len(vals) > 2 else ""
         suggest = vals[5] if len(vals) > 5 else ""
         code = suggest.split(":", 1)[0].strip() if suggest else ""
         self.ent_code.delete(0, "end")
         if code:
-            self.ent_code.insert(0, code)
+            e = self._code_office(code)
+            self.ent_code.insert(0, self._code_option_str(e) if e else code)
         rev = next((x for x in self.last_review if x["worker"] == name), None)
         if rev:
             self.var_sel.set(
@@ -855,9 +897,21 @@ class App:
         name = vals[1]
         board_office = vals[2] if len(vals) > 2 else ""
         if mode == "code":
-            val = self.ent_code.get().strip()
+            val = self._code_from_text(self.ent_code.get())
             if not val:
-                messagebox.showwarning("コード未入力", "割当先のコードを入れてください。")
+                # コード無しの自社登録(名簿を使わない運用)。判定は「自社」で確定し、
+                # 名簿コードには紐づけない。
+                if not messagebox.askokcancel(
+                        "自社として登録",
+                        f"{name} を 自社 として登録します(社員コードなし)。\n"
+                        f"（出ている番割: {board_office}）\n\n再集計で反映されます。"):
+                    return
+                val = "home"
+                self.aliases[name] = val
+                U.save_aliases(self.aliases)
+                self._refresh_alias_list()
+                self._logmsg(f"対照表に登録: {name} → 自社(コードなし)")
+                self._recompute_from_memory("対照表に登録")
                 return
             e = self._code_office(val)
             if e:
