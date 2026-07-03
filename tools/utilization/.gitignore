@@ -11,6 +11,8 @@ utilization_history.csv
 utilization_report.txt
 utilization_detail.csv
 utilization_review.csv
+snapshots/
+autorun.log
 workers_inspect.txt
 workers_colors.txt
 

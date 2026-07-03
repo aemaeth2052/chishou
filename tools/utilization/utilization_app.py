@@ -5,7 +5,7 @@
 除外キーワード(例外リスト)と対照表(外国人ニックネーム)も画面で編集できる。
 
 タブ:
-  集計     : 名簿の指定 → 「番割から集計」→ 営業所ごとの稼働率を表示
+  集計     : 「番割から集計」→ 営業所ごとの稼働率を表示(行ダブルクリックで明細)
   除外設定 : 外貨を産まない顧客/現場のキーワード(部分一致)を編集
   対照表   : 取りこぼし候補を見て、自社/他営業所/対象外を割り当て(name_aliases.json)
   履歴     : utilization_history.csv の推移を表示
@@ -33,6 +33,16 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 APP_CONFIG = HERE / "utilization_app_config.json"
 
+# 履歴グラフの系列色(営業所名の固定順で割当・途中で塗り替えない)。
+# 色覚多様性を考慮した検証済みの並び。全社合計だけは中立グレーの太線で別扱い。
+CHART_PALETTE = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
+                 "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]
+CHART_FALLBACK = "#8a8984"     # 9系列目以降(通常は営業所5つで届かない)
+CHART_TOTAL = "#52514e"        # 全社合計
+CHART_SURFACE = "#fcfcfb"
+CHART_GRID = "#e4e3e0"
+CHART_TEXT = "#52514e"
+
 
 def load_app_config():
     if APP_CONFIG.exists():
@@ -58,14 +68,17 @@ class App:
         root.geometry("960x640")
 
         self.cfg = load_app_config()
-        self.roster_paths = list(self.cfg.get("roster_paths", []))
         self.aliases = U.load_aliases()
         self.settings = U.load_settings(U.SETTINGS_PATH)
         self.last_review = []
-        self.roster_index = {}   # コード -> Employee (対照表の営業所表示用)
+        self.last_reports = []       # 直近の集計結果(明細ドリルダウン用)
+        self.last_assignments = []   # 直近の読み取り結果(設定変更時の即再計算用)
         self.q = queue.Queue()
+        self.detail_win = None       # 明細ウィンドウ(開いていれば再集計時に更新)
+        self.detail_key = None
 
         nb = ttk.Notebook(root)
+        self.nb = nb
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         self.tab_run = ttk.Frame(nb)
         self.tab_excl = ttk.Frame(nb)
@@ -92,75 +105,43 @@ class App:
     # ----------------------------------------------------------- 集計タブ
     def _build_run(self):
         f = self.tab_run
-        top = ttk.LabelFrame(f, text="社員名簿(任意・参考用。判定は『色判定』タブの背景色で行う)")
-        top.pack(fill="x", padx=8, pady=6)
-        self.lst_roster = tk.Listbox(top, height=4)
-        self.lst_roster.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-        for p in self.roster_paths:
-            self.lst_roster.insert("end", p)
-        btns = ttk.Frame(top)
-        btns.pack(side="left", fill="y", padx=4, pady=6)
-        ttk.Button(btns, text="CSV追加", command=self._add_roster_file).pack(fill="x", pady=2)
-        ttk.Button(btns, text="フォルダ追加", command=self._add_roster_dir).pack(fill="x", pady=2)
-        ttk.Button(btns, text="削除", command=self._del_roster).pack(fill="x", pady=2)
-
+        ttk.Label(f, text="自社/他社の判定は『色判定』タブの背景色と対照表で行います。"
+                  ).pack(anchor="w", padx=8, pady=(8, 0))
         run = ttk.Frame(f)
         run.pack(fill="x", padx=8, pady=4)
         self.btn_run = ttk.Button(run, text="番割から集計する",
                                   command=self._run_live)
         self.btn_run.pack(side="left")
+        ttk.Button(run, text="スナップショットから再計算",
+                   command=self._run_snapshot).pack(side="left", padx=6)
         ttk.Button(run, text="検証: inspectファイルから",
-                   command=self._run_inspect).pack(side="left", padx=6)
+                   command=self._run_inspect).pack(side="left")
         ttk.Button(run, text="出力フォルダを開く",
                    command=self._open_folder).pack(side="right")
 
-        cols = ("営業所", "日付", "リスト", "在籍(分母)", "外貨", "休み・待機",
-                "稼働率%", "貸出", "他営業所応援", "対象外")
+        cols = ("営業所", "日付", "出勤(分母)", "外貨", "休み・待機",
+                "稼働率%", "実働率%", "貸出", "他営業所応援", "対象外")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=10)
         for c in cols:
             self.tree.heading(c, text=c)
-            w = 150 if c == "営業所" else (70 if c in ("日付", "在籍(分母)", "休み・待機") else 60)
+            w = 150 if c == "営業所" else (70 if c in ("日付", "出勤(分母)", "休み・待機") else 60)
             self.tree.column(c, width=w, anchor="center")
         self.tree.column("営業所", anchor="w")
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
+        self.tree.bind("<Double-1>", self._open_detail)
+        ttk.Label(f, text="行をダブルクリックすると作業員ごとの明細を開き、"
+                  "そこから区分の手直しもできます。").pack(anchor="w", padx=10)
 
         self.log = scrolledtext.ScrolledText(f, height=7)
         self.log.pack(fill="both", expand=False, padx=8, pady=6)
-
-    def _add_roster_file(self):
-        paths = filedialog.askopenfilenames(
-            title="名簿CSVを選択", filetypes=[("CSV", "*.csv"), ("すべて", "*.*")])
-        for p in paths:
-            if p not in self.roster_paths:
-                self.roster_paths.append(p)
-                self.lst_roster.insert("end", p)
-        self._save_cfg()
-
-    def _add_roster_dir(self):
-        d = filedialog.askdirectory(title="名簿CSVの入ったフォルダを選択")
-        if d and d not in self.roster_paths:
-            self.roster_paths.append(d)
-            self.lst_roster.insert("end", d)
-            self._save_cfg()
-
-    def _del_roster(self):
-        sel = list(self.lst_roster.curselection())
-        for i in reversed(sel):
-            self.lst_roster.delete(i)
-            del self.roster_paths[i]
-        self._save_cfg()
-
-    def _save_cfg(self):
-        self.cfg["roster_paths"] = self.roster_paths
-        save_app_config(self.cfg)
 
     def _logmsg(self, s):
         self.log.insert("end", s + "\n")
         self.log.see("end")
 
     def _run_live(self):
-        # 開いている番割を列挙し、対象を選ばせてから集計する
-        # 判定は背景色で行うので名簿は任意。色設定が無い場合だけ注意を促す。
+        # 開いている番割を列挙し、対象を選ばせてから集計する。
+        # 色設定が無い場合だけ注意を促す(未設定だと全員が対象外になるため)。
         if not WC.load_color_map():
             if not messagebox.askokcancel(
                     "色判定が未設定",
@@ -187,6 +168,18 @@ class App:
             filetypes=[("テキスト", "*.txt"), ("すべて", "*.*")])
         if p:
             self._start_compute(inspect_path=p, select=None)
+
+    def _run_snapshot(self):
+        """保存済みスナップショット(生データの控え)から番割を読まずに再集計する。
+
+        設定(色・対照表・除外)を直した後、過去分を遡って計算し直す用途。
+        """
+        init = U.SNAPSHOT_DIR if U.SNAPSHOT_DIR.exists() else U.HERE
+        paths = filedialog.askopenfilenames(
+            title="スナップショットCSVを選択(複数可)", initialdir=str(init),
+            filetypes=[("CSV", "*.csv"), ("すべて", "*.*")])
+        if paths:
+            self._start_compute(snapshot_paths=list(paths))
 
     def _choose_boards(self, boards):
         """開いている番割をチェックボックスで一覧表示し、集計対象を選ばせる。"""
@@ -249,8 +242,7 @@ class App:
         ttk.Button(act, text="キャンセル", command=on_cancel).pack(side="right", padx=6)
         dlg.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    def _start_compute(self, inspect_path=None, select=None):
-        # 名簿は任意(判定は背景色)。roster_paths が空でも集計できる。
+    def _start_compute(self, inspect_path=None, select=None, snapshot_paths=None):
         self.btn_run.config(state="disabled")
         self._logmsg("集計を開始します...")
         # 最新の対照表・除外設定を読み直して使う
@@ -260,27 +252,67 @@ class App:
 
         def work():
             try:
-                reports = U.analyze(
-                    self.roster_paths, inspect_path=inspect_path,
-                    cust_kw=self.settings["exclude_customer_keywords"],
-                    site_kw=self.settings["exclude_site_keywords"],
-                    aliases=self.aliases, select=select,
-                    log=lambda s: self.q.put(("log", s)))
-                _, review, nchk, nreco = U.write_outputs(reports)
-                self.q.put(("done", (reports, review, nchk, nreco)))
-                if gs.get("enabled") and gs.get("sa_json") and gs.get("spreadsheet"):
-                    try:
-                        import sheets_sync
-                        sheets_sync.sync_history(
-                            reports, gs["sa_json"], gs["spreadsheet"],
-                            gs.get("worksheet", "稼働率履歴"),
-                            log=lambda s: self.q.put(("gslog", s)))
-                    except Exception as e:
-                        self.q.put(("gslog", f"Googleシート更新に失敗: {e}"))
+                if inspect_path:
+                    assignments = U.assignments_from_inspect(inspect_path)
+                elif snapshot_paths:
+                    assignments = U.load_snapshots(snapshot_paths)
+                    self.q.put(("log", f"スナップショット {len(snapshot_paths)} 件から"
+                                f"再計算します(番割は読みません)"))
+                else:
+                    assignments = U.read_assignments(
+                        select=select, log=lambda s: self.q.put(("log", s)))
+                self.last_assignments = assignments
+                self._compute_and_report(assignments, gs)
             except Exception as e:
                 self.q.put(("error", str(e)))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _compute_and_report(self, assignments, gs):
+        """割当リスト→集計→ファイル出力→画面更新(ワーカースレッドで呼ぶ)。"""
+        reports = U.analyze_assignments(
+            assignments,
+            cust_kw=self.settings["exclude_customer_keywords"],
+            site_kw=self.settings["exclude_site_keywords"],
+            aliases=self.aliases)
+        reports = reports + U.company_totals(reports)   # 2営業所以上の日は全社行も表示
+        _, review, nchk, nreco = U.write_outputs(reports)
+        self.q.put(("done", (reports, review, nchk, nreco)))
+        if gs.get("enabled") and gs.get("sa_json") and gs.get("spreadsheet"):
+            try:
+                import sheets_sync
+                sheets_sync.sync_history(
+                    reports, gs["sa_json"], gs["spreadsheet"],
+                    gs.get("worksheet", "稼働率履歴"),
+                    log=lambda s: self.q.put(("gslog", s)))
+            except Exception as e:
+                self.q.put(("gslog", f"Googleシート更新に失敗: {e}"))
+
+    def _recompute_from_memory(self, reason=""):
+        """直近の読み取り結果から、番割を読み直さずに即座に再集計する。
+
+        対照表・色・除外設定の保存直後に呼ぶ。読み取り前(起動直後)は何もしない。
+        """
+        if not self.last_assignments:
+            return False
+        self.aliases = U.load_aliases()
+        self.settings = U.load_settings(U.SETTINGS_PATH)
+        gs = self.cfg.get("gsheet", {})
+        assignments = self.last_assignments
+        self._logmsg(f"{reason} → 前回の読み取り結果から即再計算します"
+                     "(番割は読み直しません)")
+        if not any(a.get("bg") for a in assignments) and WC.load_color_map():
+            self._logmsg("※ 前回の読み取りは採色なしでした。色判定を反映するには"
+                         "『番割から集計する』で読み直してください。")
+
+        def work():
+            try:
+                self._compute_and_report(assignments, gs)
+            except Exception as e:
+                self.q.put(("error", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
 
     def _poll(self):
         try:
@@ -328,17 +360,124 @@ class App:
             self.tree.delete(i)
         for r in reports:
             self.tree.insert("", "end", values=(
-                r["office"], r["date"], r["roster_size"], r["present"],
+                r["office"], r["date"], r["present"],
                 r["revenue"], r["standby"],
-                f"{r['rate'] * 100:.1f}",
+                f"{r['rate'] * 100:.1f}", f"{r.get('rate_active', 0) * 100:.1f}",
                 r["lent_out"], r["other_total"], r["ignored"]))
+        self.last_reports = reports
         self.last_review = review
-        self._load_roster_index()
         self._refresh_review()
-        self._logmsg(f"完了: {len(reports)} 営業所。"
+        n_open = nchk + nreco
+        try:
+            self.nb.tab(self.tab_alias,
+                        text=f"対照表 ({n_open})" if n_open else "対照表")
+        except Exception:
+            pass
+        self._logmsg(f"完了: {len(reports)} 件。"
                      f"取りこぼし候補 要確認{nchk} / 確認推奨{nreco} 件 "
-                     f"(対照表タブで割り当て可)")
+                     f"(対照表タブか明細ダブルクリックで割り当て可)")
+        # 明細ウィンドウを開いたまま再集計したら、その中身も追随させる
+        if self.detail_win is not None and self.detail_win.winfo_exists():
+            r = next((x for x in reports
+                      if (x["office"], x["date"]) == self.detail_key), None)
+            if r:
+                self._fill_detail(r)
         self._load_history()
+
+    # ------------------------------------------------- 明細ドリルダウン
+    def _open_detail(self, _evt):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if len(vals) < 2:
+            return
+        office, date = vals[0], vals[1]
+        r = next((x for x in self.last_reports
+                  if str(x["office"]) == str(office) and str(x["date"]) == str(date)),
+                 None)
+        if r is None:
+            return
+        if r.get("is_total"):
+            messagebox.showinfo("全社合計",
+                                "全社合計に明細はありません。営業所の行を開いてください。")
+            return
+        self._show_detail(r)
+
+    def _show_detail(self, r):
+        if self.detail_win is not None and self.detail_win.winfo_exists():
+            self.detail_win.destroy()
+        win = tk.Toplevel(self.root)
+        self.detail_win = win
+        self.detail_key = (r["office"], r["date"])
+        win.title(f"明細  {r['office']}  {r['date']}")
+        win.geometry("1000x560")
+        ttk.Label(win, text="行を選んで下のボタンで区分を直せます"
+                  "(対照表に保存し、番割を読み直さず即再集計します)。"
+                  ).pack(anchor="w", padx=10, pady=(10, 2))
+        cols = ("作業員", "バッジ", "背景色", "区分", "現場種別", "判定備考", "顧客", "現場")
+        widths = {"作業員": 110, "バッジ": 60, "背景色": 70, "区分": 120,
+                  "現場種別": 70, "判定備考": 140, "顧客": 170, "現場": 170}
+        tv = ttk.Treeview(win, columns=cols, show="headings")
+        for c in cols:
+            tv.heading(c, text=c)
+            tv.column(c, width=widths.get(c, 90), anchor="w")
+        tv.pack(fill="both", expand=True, padx=10, pady=4)
+        self.detail_tree = tv
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(2, 10))
+        ttk.Label(bar, text="選択した作業員を:").pack(side="left")
+        ttk.Button(bar, text="自社として登録",
+                   command=lambda: self._detail_assign("home")).pack(side="left", padx=2)
+        ttk.Button(bar, text="他営業所応援",
+                   command=lambda: self._detail_assign("other")).pack(side="left", padx=2)
+        ttk.Button(bar, text="対象外",
+                   command=lambda: self._detail_assign("ignore")).pack(side="left", padx=2)
+        ttk.Button(bar, text="割当を削除",
+                   command=lambda: self._detail_assign("del")).pack(side="left", padx=10)
+        self._fill_detail(r)
+
+    def _fill_detail(self, r):
+        tv = self.detail_tree
+        for i in tv.get_children():
+            tv.delete(i)
+        for d in r["details"]:
+            bg = d.get("bg", "")
+            tags = ()
+            if bg:
+                t = "bg_" + bg.lstrip("#")
+                try:
+                    tv.tag_configure(t, background=bg)
+                    tags = (t,)
+                except Exception:
+                    tags = ()
+            tv.insert("", "end", tags=tags, values=(
+                d["worker"], d["badge"], bg, d["kind"], d["field"],
+                d.get("note", ""), d["customer"], d["site"]))
+
+    def _detail_assign(self, mode):
+        tv = self.detail_tree
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("未選択", "明細から行を選んでください。",
+                                parent=self.detail_win)
+            return
+        name = tv.item(sel[0], "values")[0]
+        if mode == "del":
+            if name not in self.aliases:
+                messagebox.showinfo("割当なし", f"{name} は対照表に登録されていません。",
+                                    parent=self.detail_win)
+                return
+            self.aliases.pop(name, None)
+            shown = "削除"
+        else:
+            self.aliases[name] = mode
+            shown = {"home": "自社", "other": "他営業所応援", "ignore": "対象外"}[mode]
+        U.save_aliases(self.aliases)
+        self._refresh_alias_list()
+        self._logmsg(f"対照表を更新: {name} → {shown}")
+        self._recompute_from_memory("明細から割当")
 
     def _open_folder(self):
         import subprocess
@@ -404,8 +543,9 @@ class App:
             "non_field_staff": list(self.lb_staff.get(0, "end")),
         }
         U.save_settings(self.settings)
-        messagebox.showinfo("保存しました",
-                            "除外設定を保存しました。次の集計から反映されます。")
+        if not self._recompute_from_memory("除外設定を保存"):
+            messagebox.showinfo("保存しました",
+                                "除外設定を保存しました。次の集計から反映されます。")
 
     # ----------------------------------------------------------- 色判定タブ
     def _build_color(self):
@@ -554,21 +694,22 @@ class App:
             tol = WC.DEFAULT_TOLERANCE
         WC.save_color_map(colors, tolerance=tol)
         self._color_log(f"保存しました: {len(colors)} 色 → worker_colors.json "
-                        f"(許容差 {tol})。次の集計から色判定が効きます。")
-        messagebox.showinfo("保存しました",
-                            f"{len(colors)} 色を worker_colors.json に保存しました。\n"
-                            "次回の集計から、氏名の背景色で自社/他社を判定します。")
+                        f"(許容差 {tol})。")
+        if not self._recompute_from_memory("色設定を保存"):
+            messagebox.showinfo("保存しました",
+                                f"{len(colors)} 色を worker_colors.json に保存しました。\n"
+                                "次回の集計から、氏名の背景色で自社/他社を判定します。")
 
     # ----------------------------------------------------------- 対照表タブ
     def _build_alias(self):
         f = self.tab_alias
-        ttk.Label(f, text="取りこぼし候補(集計を実行すると表示)。行を選び、"
-                  "割当先コードを確認して下のボタンで登録します。"
+        ttk.Label(f, text="取りこぼし候補(集計を実行すると表示)。"
+                  "行を選び、下のボタンで自社/他営業所/対象外を登録します(即再集計)。"
                   ).pack(anchor="w", padx=8, pady=6)
 
-        cols = ("優先", "氏名", "営業所", "バッジ", "現在の判定", "推奨コード候補", "現場")
+        cols = ("優先", "氏名", "営業所", "バッジ", "現在の判定", "現場")
         widths = {"優先": 70, "氏名": 110, "営業所": 140, "バッジ": 70,
-                  "現在の判定": 130, "推奨コード候補": 160, "現場": 150}
+                  "現在の判定": 160, "現場": 170}
         self.tree_rev = ttk.Treeview(f, columns=cols, show="headings", height=8)
         for c in cols:
             self.tree_rev.heading(c, text=c)
@@ -582,15 +723,9 @@ class App:
 
         row = ttk.Frame(f)
         row.pack(fill="x", padx=8, pady=4)
-        ttk.Label(row, text="割当先コード:").pack(side="left")
-        self.ent_code = ttk.Entry(row, width=14)
-        self.ent_code.pack(side="left", padx=4)
-        self.ent_code.bind("<KeyRelease>", lambda _e: self._refresh_code_label())
-        self.var_code_resolved = tk.StringVar(value="")
-        ttk.Label(row, textvariable=self.var_code_resolved, width=30).pack(
-            side="left", padx=4)
+        ttk.Label(row, text="選択した候補を:").pack(side="left")
         ttk.Button(row, text="自社として登録",
-                   command=lambda: self._assign("code")).pack(side="left", padx=2)
+                   command=lambda: self._assign("home")).pack(side="left", padx=2)
         ttk.Button(row, text="他営業所応援",
                    command=lambda: self._assign("other")).pack(side="left", padx=2)
         ttk.Button(row, text="対象外",
@@ -601,40 +736,13 @@ class App:
         self.tree_al = ttk.Treeview(cur, columns=("氏名", "割当"), show="headings",
                                     height=7)
         self.tree_al.heading("氏名", text="氏名")
-        self.tree_al.heading("割当", text="割当(コード/other/ignore)")
+        self.tree_al.heading("割当", text="割当(home=自社 / other / ignore)")
         self.tree_al.column("氏名", width=200, anchor="w")
         self.tree_al.column("割当", width=260, anchor="w")
         self.tree_al.pack(side="left", fill="both", expand=True, padx=6, pady=6)
         ttk.Button(cur, text="選択を削除", command=self._del_alias).pack(
             side="left", padx=4)
-        self._load_roster_index()
         self._refresh_alias_list()
-
-    def _load_roster_index(self):
-        """名簿を読み、コード -> Employee の辞書を作る(対照表の営業所表示用)。"""
-        self.roster_index = {}
-        if not self.roster_paths:
-            return
-        try:
-            for e in U.load_rosters(self.roster_paths, active_only=False):
-                self.roster_index[e.code] = e
-        except Exception:
-            pass  # 名簿が未指定/不正でも対照表自体は使えるようにする
-
-    def _code_office(self, code):
-        """コードを名簿で解決して Employee を返す(無ければ None)。"""
-        return self.roster_index.get((code or "").strip())
-
-    def _refresh_code_label(self):
-        """入力中のコードを名簿で解決し「→ 氏名(営業所)」をライブ表示。"""
-        code = self.ent_code.get().strip()
-        e = self._code_office(code)
-        if not code:
-            self.var_code_resolved.set("")
-        elif e:
-            self.var_code_resolved.set(f"→ {e.name.strip()}（{e.office or '営業所不明'}）")
-        else:
-            self.var_code_resolved.set("→ ⚠ 名簿に無いコード")
 
     def _on_rev_select(self, _evt):
         sel = self.tree_rev.selection()
@@ -642,17 +750,11 @@ class App:
             return
         vals = self.tree_rev.item(sel[0], "values")
         name = vals[1] if len(vals) > 1 else ""
-        suggest = vals[5] if len(vals) > 5 else ""
-        code = suggest.split(":", 1)[0].strip() if suggest else ""
-        self.ent_code.delete(0, "end")
-        if code:
-            self.ent_code.insert(0, code)
         rev = next((x for x in self.last_review if x["worker"] == name), None)
         if rev:
             self.var_sel.set(
                 f"選択中: {rev['worker']}　／　番割の営業所: {rev['office']}"
                 f"（{rev['date']}）　／　現在: {rev['current']}")
-        self._refresh_code_label()
 
     def _assign(self, mode):
         sel = self.tree_rev.selection()
@@ -662,38 +764,16 @@ class App:
         vals = self.tree_rev.item(sel[0], "values")
         name = vals[1]
         board_office = vals[2] if len(vals) > 2 else ""
-        if mode == "code":
-            val = self.ent_code.get().strip()
-            if not val:
-                messagebox.showwarning("コード未入力", "割当先のコードを入れてください。")
-                return
-            e = self._code_office(val)
-            if e:
-                detail = (f"{name} を 自社 として登録します。\n\n"
-                          f"割当コード {val} = {e.name.strip()}（{e.office or '営業所不明'}）\n"
-                          f"この人が出ている番割: {board_office}\n\n再集計で反映されます。")
-                bo = U.office_key(board_office)
-                if e.office and bo and e.office != bo:
-                    detail += (f"\n\n⚠ 注意: コードの営業所（{e.office}）と"
-                               f"番割の営業所（{bo}）が一致していません。"
-                               "別人のコードを入れていないか確認してください。")
-            else:
-                detail = (f"{name} を 自社 として登録します。\n\n"
-                          f"⚠ コード {val} は名簿に見つかりません。コードを確認してください。\n"
-                          f"この人が出ている番割: {board_office}\n\n再集計で反映されます。")
-            if not messagebox.askokcancel("自社として登録", detail):
-                return
-        else:
-            val = mode  # 'other' / 'ignore'
-            label = "他営業所応援" if mode == "other" else "対象外"
-            if not messagebox.askokcancel(
-                    label, f"{name} を 「{label}」 として登録します。\n"
-                           f"（出ている番割: {board_office}）\n\n再集計で反映されます。"):
-                return
-        self.aliases[name] = val
+        label = {"home": "自社", "other": "他営業所応援", "ignore": "対象外"}[mode]
+        if not messagebox.askokcancel(
+                label, f"{name} を 「{label}」 として登録します。\n"
+                       f"（出ている番割: {board_office}）\n\n再集計で反映されます。"):
+            return
+        self.aliases[name] = mode
         U.save_aliases(self.aliases)
         self._refresh_alias_list()
-        self._logmsg(f"対照表に登録: {name} → {val}")
+        self._logmsg(f"対照表に登録: {name} → {label}")
+        self._recompute_from_memory("対照表に登録")
 
     def _refresh_review(self):
         for i in self.tree_rev.get_children():
@@ -701,7 +781,7 @@ class App:
         for x in self.last_review:
             self.tree_rev.insert("", "end", values=(
                 x["priority"], x["worker"], x["office"], x["badge"], x["current"],
-                x.get("suggest", ""), x["site"]))
+                x["site"]))
 
     def _refresh_alias_list(self):
         for i in self.tree_al.get_children():
@@ -717,6 +797,7 @@ class App:
         self.aliases.pop(key, None)
         U.save_aliases(self.aliases)
         self._refresh_alias_list()
+        self._recompute_from_memory("対照表から削除")
 
     # ----------------------------------------------------------- 履歴タブ
     def _build_history(self):
@@ -724,33 +805,117 @@ class App:
         bar = ttk.Frame(f)
         bar.pack(fill="x", padx=8, pady=6)
         ttk.Button(bar, text="更新", command=self._load_history).pack(side="left")
-        ttk.Label(bar, text="  utilization_history.csv").pack(side="left")
-        self.tree_hist = ttk.Treeview(f, show="headings", height=20)
+        ttk.Label(bar, text="  utilization_history.csv"
+                  "  (折れ線 = 稼働率%・直近30日)").pack(side="left")
+        self.hist_canvas = tk.Canvas(f, height=230, bg=CHART_SURFACE,
+                                     highlightthickness=0)
+        self.hist_canvas.pack(fill="x", padx=8, pady=(0, 4))
+        self.hist_canvas.bind("<Configure>", lambda _e: self._draw_history_chart())
+        self._hist_series = ({}, [])
+        self.tree_hist = ttk.Treeview(f, show="headings", height=12)
         self.tree_hist.pack(fill="both", expand=True, padx=8, pady=4)
         self._load_history()
 
     def _load_history(self):
         path = U.HISTORY_PATH
+        self._hist_series = ({}, [])
         for i in self.tree_hist.get_children():
             self.tree_hist.delete(i)
-        if not Path(path).exists():
-            return
+        rows = []
+        if Path(path).exists():
+            try:
+                with open(path, encoding="cp932", errors="replace", newline="") as fp:
+                    rows = list(csv.reader(fp))
+            except Exception:
+                rows = []
+        if rows:
+            header = rows[0]
+            self.tree_hist["columns"] = header
+            for c in header:
+                self.tree_hist.heading(c, text=c)
+                self.tree_hist.column(c, width=90, anchor="center")
+            self.tree_hist.column(header[1] if len(header) > 1 else header[0],
+                                  width=150, anchor="w")
+            for r in rows[1:]:
+                self.tree_hist.insert("", "end", values=r)
+            self._hist_series = self._parse_history_series(header, rows[1:])
+        self._draw_history_chart()
+
+    @staticmethod
+    def _parse_history_series(header, rows):
+        """履歴の行から {営業所: {日付: 稼働率%}} と日付列(直近30日)を作る。"""
         try:
-            with open(path, encoding="cp932", errors="replace", newline="") as fp:
-                rows = list(csv.reader(fp))
-        except Exception:
+            i_rate = header.index("稼働率%")
+        except ValueError:
+            return {}, []
+        dates = sorted({r[0] for r in rows if len(r) > i_rate and r[0]})[-30:]
+        dset = set(dates)
+        series = {}
+        for r in rows:
+            if len(r) <= i_rate or r[0] not in dset:
+                continue
+            try:
+                v = float(r[i_rate])
+            except ValueError:
+                continue
+            series.setdefault(r[1], {})[r[0]] = v
+        return series, dates
+
+    def _draw_history_chart(self):
+        c = self.hist_canvas
+        c.delete("all")
+        series, dates = self._hist_series
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 120 or H < 80:
             return
-        if not rows:
+        if not series or not dates:
+            c.create_text(W / 2, H / 2, fill=CHART_TEXT,
+                          text="集計を重ねると、ここに稼働率の推移が出ます")
             return
-        header = rows[0]
-        self.tree_hist["columns"] = header
-        for c in header:
-            self.tree_hist.heading(c, text=c)
-            self.tree_hist.column(c, width=90, anchor="center")
-        self.tree_hist.column(header[1] if len(header) > 1 else header[0],
-                              width=150, anchor="w")
-        for r in rows[1:]:
-            self.tree_hist.insert("", "end", values=r)
+        ml, mr, mt, mb = 40, 14, 30, 22
+
+        def px(i):
+            if len(dates) <= 1:
+                return ml + (W - ml - mr) / 2
+            return ml + (W - ml - mr) * i / (len(dates) - 1)
+
+        def py(v):
+            return mt + (H - mt - mb) * (1 - min(max(v, 0), 100) / 100.0)
+
+        for g in (0, 25, 50, 75, 100):
+            y = py(g)
+            c.create_line(ml, y, W - mr, y, fill=CHART_GRID)
+            c.create_text(ml - 6, y, text=str(g), anchor="e",
+                          fill=CHART_TEXT, font=("", 8))
+        c.create_text(px(0), H - mb + 10, text=dates[0], anchor="w",
+                      fill=CHART_TEXT, font=("", 8))
+        if len(dates) > 1:
+            c.create_text(px(len(dates) - 1), H - mb + 10, text=dates[-1],
+                          anchor="e", fill=CHART_TEXT, font=("", 8))
+
+        # 系列色は営業所名の固定順で割当(全社合計はグレー太線)。凡例は上段に並べる。
+        names = sorted(series)
+        normal = [n for n in names if not n.startswith(U.COMPANY_TOTAL_LABEL)]
+        color_of = {}
+        for i, n in enumerate(normal):
+            color_of[n] = (CHART_PALETTE[i] if i < len(CHART_PALETTE)
+                           else CHART_FALLBACK)
+        lx = ml
+        for n in names:
+            is_total = n.startswith(U.COMPANY_TOTAL_LABEL)
+            color = CHART_TOTAL if is_total else color_of[n]
+            width = 3 if is_total else 2
+            pts = [(px(i), py(series[n][d]))
+                   for i, d in enumerate(dates) if d in series[n]]
+            if len(pts) >= 2:
+                c.create_line(*[xy for p in pts for xy in p],
+                              fill=color, width=width)
+            for x, y in pts if len(pts) < 2 else pts[-1:]:
+                c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=color, outline="")
+            c.create_rectangle(lx, 8, lx + 10, 18, fill=color, outline="")
+            t = c.create_text(lx + 14, 13, text=n, anchor="w",
+                              fill="#0b0b0b", font=("", 9))
+            lx = c.bbox(t)[2] + 14
 
     # -------------------------------------------------------- Google連携タブ
     def _build_gsheet(self):
