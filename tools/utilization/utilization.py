@@ -51,6 +51,7 @@ ALIASES_PATH = HERE / "name_aliases.json"
 SETTINGS_PATH = HERE / "utilization_settings.json"
 HISTORY_PATH = HERE / "utilization_history.csv"
 REVIEW_PATH = HERE / "utilization_review.csv"
+SNAPSHOT_DIR = HERE / "snapshots"
 DEFAULT_EXCLUDE = ("第一元商", "宮崎興業")
 # 番割の「待機」「休み」枠。ここに割り当てられた人も分母に入れる(出勤扱い)が、
 # 外貨にも管理費にも入れない。
@@ -493,16 +494,100 @@ def staff_set(lst):
     return s
 
 
-def analyze(roster_paths=None, inspect_path=None, cust_kw=None, site_kw=None,
-            aliases=None, staff=None, select=None, colormap=None, log=print):
-    """番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。
+# ------------------------------------------------- スナップショット(生データの控え)
+# 集計のたびに、読み取った生の割当(誰が・どこに・どの色で)を (営業所,日付) ごとの
+# CSVに保存する。番割が画面から消えた後でも、色・対照表・除外の設定を直して
+# このファイルだけで過去分を再集計できる(集計を「保存データに対する純粋計算」にする)。
+SNAPSHOT_HEADER = ["営業所", "日付", "顧客", "現場", "作業員", "バッジ", "状態", "背景色"]
+_FNAME_BAD_RE = re.compile(r'[\\/:*?"<>|]+')
 
-    判定は氏名の背景色(worker_colors)で行う。名簿(roster_paths)は任意で、渡せば
-    在籍数の参考と名簿コードの解決にだけ使う(判定には影響しない)。
 
-    select: None なら開いている全番割を集計。(営業所, 日付) のタプル集合を渡すと、
-            その番割だけを集計する(inspect_path 指定時は無視)。
-    colormap: worker_color.ColorMap。None なら worker_colors.json を読む。
+def snapshot_path(office, date, base=SNAPSHOT_DIR):
+    """(営業所, 日付) のスナップショットの保存先パスを返す。"""
+    office_s = _FNAME_BAD_RE.sub("_", (office or "").strip()) or "営業所不明"
+    return Path(base) / f"{date or '日付不明'}_{office_s}.csv"
+
+
+def save_snapshots(assignments, base=SNAPSHOT_DIR, log=print):
+    """読み取った生の割当を (営業所,日付) ごとのCSVに保存する。
+
+    同じ(営業所,日付)は最新の読み取りで上書き(履歴の upsert と同じ考え方)。
+    Returns: 保存したファイルパスのリスト。
+    """
+    boards = defaultdict(list)
+    for a in assignments:
+        boards[(a.get("office", ""), a.get("date", ""))].append(a)
+    if not boards:
+        return []
+    Path(base).mkdir(parents=True, exist_ok=True)
+    paths = []
+    for (office, date), rows in sorted(boards.items()):
+        p = snapshot_path(office, date, base)
+        with open(p, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(SNAPSHOT_HEADER)
+            for a in rows:
+                w.writerow([a.get("office", ""), a.get("date", ""),
+                            a.get("customer", ""), a.get("site", ""),
+                            a.get("worker", ""), a.get("badge", ""),
+                            a.get("status", ""), a.get("bg", "")])
+        paths.append(p)
+    log(f"スナップショット保存: {len(paths)} 番割 → {Path(base).name}/")
+    return paths
+
+
+def load_snapshots(paths):
+    """スナップショットCSV(ファイル/フォルダ混在可)を読み、割当リストを返す。"""
+    files = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            files.extend(sorted(p.glob("*.csv")) + sorted(p.glob("*.CSV")))
+        elif p.exists():
+            files.append(p)
+        else:
+            raise RuntimeError(f"スナップショットが見つかりません: {p}")
+    if not files:
+        raise RuntimeError("スナップショットCSVが1つも見つかりません")
+    out = []
+    for fpath in files:
+        with open(fpath, encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.reader(f))
+        if not rows or rows[0] != SNAPSHOT_HEADER:
+            raise RuntimeError(f"スナップショット形式ではありません: {fpath}")
+        for r in rows[1:]:
+            if len(r) < len(SNAPSHOT_HEADER) or not r[4].strip():
+                continue
+            out.append({"office": r[0], "date": r[1], "customer": r[2],
+                        "site": r[3], "worker": r[4], "badge": r[5],
+                        "status": r[6], "bg": r[7]})
+    return out
+
+
+def read_assignments(select=None, colormap=None, log=print, snapshot=True):
+    """開いている番割から全作業員の割当を読み取って返す(既定でスナップショットも保存)。
+
+    GUI はこの戻り値をメモリ保持しておけば、設定変更時に番割を読み直さず
+    analyze_assignments() だけで即座に再集計できる。
+    """
+    if colormap is None:
+        colormap = load_colormap()
+    # 色マップが登録されているときだけ採色する(空なら採色コスト無し)
+    assignments = assignments_from_hks(select=select, color=bool(colormap), log=log)
+    if snapshot:
+        try:
+            save_snapshots(assignments, log=log)
+        except Exception as e:
+            log(f"スナップショット保存に失敗(集計は続行): {e}")
+    return assignments
+
+
+def analyze_assignments(assignments, roster_paths=None, cust_kw=None, site_kw=None,
+                        aliases=None, staff=None, colormap=None):
+    """割当リストから (営業所,日付)ごとのレポート一覧を返す(純粋計算)。
+
+    割当の出どころは問わない: 番割の読み取り(read_assignments)・スナップショット
+    (load_snapshots)・inspectダンプ(assignments_from_inspect)・GUIのメモリ保持。
     """
     roster = load_rosters(roster_paths, active_only=True) if roster_paths else []
     if aliases is None:
@@ -515,11 +600,6 @@ def analyze(roster_paths=None, inspect_path=None, cust_kw=None, site_kw=None,
         site_kw = s["exclude_site_keywords"] if site_kw is None else site_kw
         staff = s["non_field_staff"] if staff is None else staff
     staff_keys = staff_set(staff)
-    if inspect_path:
-        assignments = assignments_from_inspect(inspect_path)
-    else:
-        # 色マップが登録されているときだけ採色する(空なら従来どおりで採色コスト無し)
-        assignments = assignments_from_hks(select=select, color=bool(colormap), log=log)
     boards = defaultdict(list)
     for a in assignments:
         boards[(a.get("office", ""), a.get("date", ""))].append(a)
@@ -529,6 +609,32 @@ def analyze(roster_paths=None, inspect_path=None, cust_kw=None, site_kw=None,
                                      cust_kw, site_kw, aliases, staff_keys,
                                      colormap=colormap))
     return reports
+
+
+def analyze(roster_paths=None, inspect_path=None, cust_kw=None, site_kw=None,
+            aliases=None, staff=None, select=None, colormap=None,
+            snapshot_paths=None, log=print):
+    """番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。
+
+    判定は氏名の背景色(worker_colors)で行う。名簿(roster_paths)は任意で、渡せば
+    在籍数の参考と名簿コードの解決にだけ使う(判定には影響しない)。
+
+    select: None なら開いている全番割を集計。(営業所, 日付) のタプル集合を渡すと、
+            その番割だけを集計する(inspect_path 指定時は無視)。
+    colormap: worker_color.ColorMap。None なら worker_colors.json を読む。
+    snapshot_paths: スナップショットCSV(ファイル/フォルダ)から再集計する。
+            番割は読まない(過去分の遡り再計算用)。
+    """
+    if colormap is None:
+        colormap = load_colormap()
+    if inspect_path:
+        assignments = assignments_from_inspect(inspect_path)
+    elif snapshot_paths:
+        assignments = load_snapshots(snapshot_paths)
+    else:
+        assignments = read_assignments(select=select, colormap=colormap, log=log)
+    return analyze_assignments(assignments, roster_paths, cust_kw, site_kw,
+                               aliases, staff, colormap)
 
 
 def collect_review(reports):
@@ -700,6 +806,9 @@ def main():
                     help="(任意)社員名簿CSV(Shift-JIS)。判定は背景色で行うので必須ではない。"
                          "渡すと在籍数の参考・名簿コード解決に使う。フォルダ可")
     ap.add_argument("--inspect", help="workers_inspect.txt から計算(指定時は番割を読まない)")
+    ap.add_argument("--snapshot", nargs="*", default=None,
+                    help="スナップショットCSV(snapshots/ のファイル/フォルダ)から再集計。"
+                         "番割を読まない。設定を直した後の過去分の遡り再計算用")
     ap.add_argument("--exclude", nargs="*", default=None,
                     help="外貨を産まない顧客キーワード(部分一致)。指定時は設定ファイルより優先")
     ap.add_argument("--out", default=str(HERE / "utilization_report.txt"))
@@ -716,8 +825,12 @@ def main():
     site_kw = settings["exclude_site_keywords"]
     print(f"除外キーワード  顧客: {cust_kw}  現場: {site_kw}")
 
+    snapshot_paths = args.snapshot if args.snapshot else None
+    if args.snapshot is not None and not args.snapshot:
+        snapshot_paths = [SNAPSHOT_DIR]   # --snapshot 引数なし = snapshots/ 全部
     reports = analyze(args.roster, inspect_path=args.inspect,
-                      cust_kw=cust_kw, site_kw=site_kw, aliases=aliases)
+                      cust_kw=cust_kw, site_kw=site_kw, aliases=aliases,
+                      snapshot_paths=snapshot_paths)
 
     out_text, review, n_check, n_reco = write_outputs(
         reports, args.out, args.csv, args.history, args.review)
