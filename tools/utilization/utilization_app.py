@@ -118,7 +118,7 @@ class App:
                    command=self._open_folder).pack(side="right")
 
         cols = ("営業所", "日付", "リスト", "在籍(分母)", "外貨", "休み・待機",
-                "稼働率%", "貸出", "他営業所応援", "対象外")
+                "稼働率%", "実働率%", "貸出", "他営業所応援", "対象外")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=10)
         for c in cols:
             self.tree.heading(c, text=c)
@@ -298,6 +298,7 @@ class App:
             cust_kw=self.settings["exclude_customer_keywords"],
             site_kw=self.settings["exclude_site_keywords"],
             aliases=self.aliases)
+        reports = reports + U.company_totals(reports)   # 2営業所以上の日は全社行も表示
         _, review, nchk, nreco = U.write_outputs(reports)
         self.q.put(("done", (reports, review, nchk, nreco)))
         if gs.get("enabled") and gs.get("sa_json") and gs.get("spreadsheet"):
@@ -384,7 +385,7 @@ class App:
             self.tree.insert("", "end", values=(
                 r["office"], r["date"], r["roster_size"], r["present"],
                 r["revenue"], r["standby"],
-                f"{r['rate'] * 100:.1f}",
+                f"{r['rate'] * 100:.1f}", f"{r.get('rate_active', 0) * 100:.1f}",
                 r["lent_out"], r["other_total"], r["ignored"]))
         self.last_review = review
         self._load_roster_index()

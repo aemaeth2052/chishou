@@ -400,6 +400,11 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
     absent = roster_size - roster_on  # 名簿在籍だが番割に名前なし(分母外・参考)
     denominator = present
     rate = (num / denominator) if denominator else 0.0
+    # 実働率 = 外貨 ÷ (出勤 − 休み)。休みは管理で動かせないので分母から除き、
+    # 「出られる人をどれだけ外貨現場に出せたか」(配車・営業の実力)を見る。
+    # 待機は「出られたのに出せなかった」なので分母に残す。
+    denominator_active = denominator - standby_yasumi
+    rate_active = (num / denominator_active) if denominator_active else 0.0
 
     by_office = defaultdict(int)
     for k in oth_on:
@@ -414,6 +419,7 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
         "standby": standby, "standby_taiki": standby_taiki,
         "standby_yasumi": standby_yasumi, "absent": absent,
         "rate": rate, "lent_out": len(home_lent),
+        "denominator_active": denominator_active, "rate_active": rate_active,
         "overhead_names": sorted(home_name[k] for k in (home_ovh - home_rev)),
         "other_total": len(oth_on), "other_revenue": len(oth_rev),
         "other_by_office": dict(by_office),
@@ -428,14 +434,22 @@ def render_board(r):
     L.append("=" * 66)
     L.append(f"作業員稼働率  {r['office']}  {r['date']}")
     L.append("=" * 66)
+    if r.get("is_total"):
+        L.append("※ 選択した番割の単純合計。営業所間の応援は、貸し手側で自社として"
+                 "1回だけ数えている(下の応援人数は内部の貸し借りを含む参考値)。")
+        L.append("-" * 66)
     if r.get("colormap_empty"):
         L.append("⚠ 色判定が未設定です。氏名の背景色で自社/他社を判定するため、"
                  "『色判定』タブで白=自社などの色を登録してください(未設定だと全員対象外)。")
         L.append("-" * 66)
     rate = r["rate"] * 100
+    rate_active = r.get("rate_active", 0.0) * 100
     L.append(f"★ 稼働率 = 外貨現場 {r['revenue']} ÷ 分母(出勤) {r['denominator']} "
              f"= {rate:.1f}%")
     L.append(f"   (分母 = 番割に名前のある自社(背景色=自社)。待機/休み枠も含む)")
+    L.append(f"☆ 実働率 = 外貨現場 {r['revenue']} ÷ (出勤 {r['denominator']} − "
+             f"休み {r.get('standby_yasumi', 0)}) = {rate_active:.1f}%")
+    L.append(f"   (休みは管理で動かせないので分母から除外。待機は残す=配車・営業の実力)")
     L.append("-" * 66)
     L.append("【自営業所 内訳(分母の中身)】")
     L.append(f"  外貨を産む現場  : {r['revenue']:>4} 名  ← 稼働(分子)")
@@ -461,20 +475,100 @@ def render_board(r):
 
 
 HISTORY_HEADER = ["日付", "営業所", "在籍", "出勤(分母)", "外貨(分子)",
-                  "管理費", "待機休み", "番割なし(参考)", "稼働率%",
+                  "管理費", "待機休み", "番割なし(参考)", "稼働率%", "実働率%",
                   "他営業所応援", "対象外"]
+# 実働率% 追加前の旧ヘッダ(既存CSVの読み替え用)
+_OLD_HISTORY_HEADER = HISTORY_HEADER[:9] + HISTORY_HEADER[10:]
+_RATE_ACTIVE_COL = 9   # 実働率% の列位置(旧形式の行にはここへ空欄を挿す)
+
+COMPANY_TOTAL_LABEL = "全社合計"
+
+
+def company_totals(reports):
+    """同じ日付の複数営業所レポートを合算した「全社合計」レポートを返す。
+
+    2営業所以上そろった日付だけ作る(1営業所しかない日は合計＝その営業所で無意味)。
+    営業所間の応援は貸し手側の番割で自社として1回だけ数えられている前提の単純合計。
+    other_total(借りた人工)は内部の貸し借りを含む参考値になる。
+    """
+    by_date = defaultdict(list)
+    for r in reports:
+        if not r.get("is_total"):
+            by_date[r["date"]].append(r)
+    totals = []
+    sum_keys = ("roster_size", "denominator", "present", "revenue",
+                "overhead_only", "standby", "standby_taiki", "standby_yasumi",
+                "absent", "lent_out", "other_total", "other_revenue", "ignored")
+    for date, rs in sorted(by_date.items()):
+        if len(rs) < 2:
+            continue
+        t = {k: sum(r[k] for r in rs) for k in sum_keys}
+        t["office"] = f"{COMPANY_TOTAL_LABEL}({len(rs)}営業所)"
+        t["date"] = date
+        t["is_total"] = True
+        t["colormap_empty"] = any(r.get("colormap_empty") for r in rs)
+        t["rate"] = (t["revenue"] / t["denominator"]) if t["denominator"] else 0.0
+        t["denominator_active"] = t["denominator"] - t["standby_yasumi"]
+        t["rate_active"] = ((t["revenue"] / t["denominator_active"])
+                            if t["denominator_active"] else 0.0)
+        names = []
+        for r in rs:
+            names.extend(r.get("overhead_names", []))
+        t["overhead_names"] = sorted(names)
+        by_office = defaultdict(int)
+        for r in rs:
+            for k, v in r.get("other_by_office", {}).items():
+                by_office[k] += v
+        t["other_by_office"] = dict(by_office)
+        t["details"] = []
+        t["review"] = []
+        totals.append(t)
+    return totals
+
+
+def render_support_matrix(reports):
+    """営業所間の応援(借り手×貸し手)マトリクスの文字列を返す。データが無ければ空。"""
+    by_date = defaultdict(dict)   # date -> {借り手: {貸し手: 人数}}
+    lenders = set()
+    for r in reports:
+        if r.get("is_total") or not r.get("other_by_office"):
+            continue
+        borrower = office_key(r["office"]) or r["office"]
+        by_date[r["date"]][borrower] = r["other_by_office"]
+        lenders.update(r["other_by_office"].keys())
+    if not by_date:
+        return ""
+    L = []
+    for date, rows in sorted(by_date.items()):
+        cols = sorted(lenders)
+        L.append("=" * 66)
+        L.append(f"営業所間の応援マトリクス(借り手 × 貸し手)  {date}")
+        L.append("=" * 66)
+        L.append("  " + f"{'借り手＼貸し手':<14}" + "".join(f"{c:>8}" for c in cols)
+                 + f"{'計':>8}")
+        for borrower, m in sorted(rows.items()):
+            vals = [m.get(c, 0) for c in cols]
+            L.append("  " + f"{borrower:<14}"
+                     + "".join(f"{(v if v else '-'):>8}" for v in vals)
+                     + f"{sum(vals):>8}")
+        L.append("")
+    return "\n".join(L).rstrip()
 
 
 def append_history(path, reports):
-    """日次履歴CSVに追記する。同じ(日付,営業所)は最新で置き換える。"""
+    """日次履歴CSVに追記する。同じ(日付,営業所)は最新で置き換える。
+
+    実働率% 追加前の旧形式のCSVは、読み込み時にその列へ空欄を挿して新形式に揃える。
+    """
     path = Path(path)
     existing = []
     if path.exists():
         with open(path, encoding="cp932", errors="replace", newline="") as f:
             rdr = csv.reader(f)
             rows = list(rdr)
-        if rows and rows[0] == HISTORY_HEADER:
-            existing = rows[1:]
+        if rows and rows[0] == _OLD_HISTORY_HEADER:
+            existing = [r[:_RATE_ACTIVE_COL] + [""] + r[_RATE_ACTIVE_COL:]
+                        for r in rows[1:]]
         else:
             existing = rows[1:] if rows else []
     keep = []
@@ -486,7 +580,8 @@ def append_history(path, reports):
     for r in reports:
         keep.append([r["date"], r["office"], r["roster_size"], r["present"],
                      r["revenue"], r["overhead_only"], r["standby"], r["absent"],
-                     f"{r['rate'] * 100:.1f}", r["other_total"], r["ignored"]])
+                     f"{r['rate'] * 100:.1f}", f"{r.get('rate_active', 0) * 100:.1f}",
+                     r["other_total"], r["ignored"]])
     keep.sort(key=lambda x: (str(x[0]), str(x[1])))
     with open(path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
@@ -791,7 +886,14 @@ def write_outputs(reports, out_path=None, csv_path=None,
     """
     out_path = out_path or (HERE / "utilization_report.txt")
     csv_path = csv_path or (HERE / "utilization_detail.csv")
+    # 2営業所以上そろった日付には全社合計を足す(呼び出し側で足済みなら重複させない)
+    reports = list(reports)
+    if not any(r.get("is_total") for r in reports):
+        reports += company_totals(reports)
     out_text = "\n\n".join(render_board(r) for r in reports)
+    matrix = render_support_matrix(reports)
+    if matrix:
+        out_text += "\n\n" + matrix
     Path(out_path).write_text(out_text, encoding="utf-8")
 
     with open(csv_path, "w", encoding="cp932", errors="replace", newline="") as f:
