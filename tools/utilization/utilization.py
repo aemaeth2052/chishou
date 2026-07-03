@@ -7,7 +7,7 @@
 区分の判定(ユーザー確認済み 2026-06):
   番割では作業員の自社/他社が「氏名セルの背景色」で表示される。この背景色
   (worker_colors.json)と手動補正(name_aliases.json)だけで3区分に分ける。
-  名簿(CSV)は判定に使わない(任意。在籍数の参考・コード解決にだけ使う)。
+  名簿(CSV)は使わない(在籍者の移り変わりが激しく参考にならないため廃止。2026-07)。
 
     ・自営業所     … 背景色が「自社」に割り当てた色(例: 白)
     ・他営業所応援 … 背景色が「他営業所応援」の色
@@ -28,17 +28,16 @@
   他営業所応援は「借りた人工」として別集計。集計対象外はカウントしない。
 
 使い方:
-  # Hks の番割予定表(複数可)を開いた状態で実行(名簿は任意)
+  # Hks の番割予定表(複数可)を開いた状態で実行
   python utilization.py
-  python utilization.py --roster 名簿.csv   # 在籍数の参考が欲しいとき
 
-  # 番割を読まずに、インスペクタ出力(workers_inspect.txt)から再計算(検証用)
+  # 番割を読まずに、保存済みスナップショット/インスペクタ出力から再計算
+  python utilization.py --snapshot
   python utilization.py --inspect workers_inspect.txt
 """
 
 import argparse
 import csv
-import io
 import json
 import re
 import sys
@@ -79,10 +78,6 @@ def load_settings(path):
                 s[k] = [str(x) for x in v if str(x).strip()]
     return s
 
-# 名簿CSVの列位置(Hks 出力。ヘッダ: コード,名称,フリガナ,営業所,区分,備考,Bk,在,…)
-COL_CODE, COL_NAME, COL_FURI, COL_OFFICE, COL_NOTE, COL_ACTIVE = 0, 1, 2, 3, 5, 7
-
-
 # ------------------------------------------------------------------ 文字正規化
 def _nfkc(s):
     return unicodedata.normalize("NFKC", s or "")
@@ -91,12 +86,6 @@ def _nfkc(s):
 def _norm(s):
     """空白(全角・半角)を除いた比較用キー。"""
     return _nfkc(s).replace("　", "").replace(" ", "").strip()
-
-
-def _is_kana(s):
-    """全角カタカナ(+長音・中黒)だけで構成されるか(外国人の短縮名判定)。"""
-    t = _nfkc(s).replace("　", "").replace(" ", "")
-    return bool(t) and bool(re.fullmatch(r"[ァ-ヶー・]+", t))
 
 
 def office_key(s):
@@ -110,135 +99,24 @@ def office_key(s):
     return t.replace("　", "").replace(" ", "").strip()
 
 
-# ----------------------------------------------------------------------- 名簿
-class Employee:
-    __slots__ = ("code", "name", "furi", "note", "office")
-
-    def __init__(self, code, name, furi, note, office):
-        self.code, self.name, self.furi, self.note = code, name, furi, note
-        self.office = office  # 正規化済み営業所キー
-
-
-def load_roster(csv_path, active_only=True):
-    """名簿CSV(Shift-JIS)を読み、在籍社員のリストを返す。"""
-    raw = Path(csv_path).read_bytes()
-    for enc in ("cp932", "shift_jis", "utf-8-sig", "utf-8"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        raise RuntimeError(f"名簿CSVの文字コードを判別できません: {csv_path}")
-
-    rows = list(csv.reader(io.StringIO(text)))
-    if not rows:
-        raise RuntimeError("名簿CSVが空です")
-    out = []
-    for r in rows[1:]:  # 1行目はヘッダ
-        if len(r) <= COL_ACTIVE or not r[COL_CODE].strip():
-            continue
-        if active_only and r[COL_ACTIVE].strip() != "True":
-            continue
-        out.append(Employee(
-            r[COL_CODE].strip(), r[COL_NAME], r[COL_FURI], r[COL_NOTE],
-            office_key(r[COL_OFFICE]) if len(r) > COL_OFFICE else "",
-        ))
-    return out
-
-
-def load_rosters(paths, active_only=True):
-    """複数の名簿CSV(営業所ごとに分かれていてもよい)をまとめて読む。
-
-    paths にはファイルとフォルダを混在指定できる。フォルダは中の *.csv を全部読む。
-    同じコードの社員が重複したら最初の1件を採用する。
-    各社員は自分のCSVの「営業所」列から営業所キーを持つので、番割ごとの絞り込みは
-    そのキーで自動的に効く。
-    """
-    files = []
-    for p in paths:
-        p = Path(p)
-        if p.is_dir():
-            files.extend(sorted(p.glob("*.csv")) + sorted(p.glob("*.CSV")))
-        elif p.exists():
-            files.append(p)
-        else:
-            raise RuntimeError(f"名簿が見つかりません: {p}")
-    if not files:
-        raise RuntimeError("名簿CSVが1つも見つかりません")
-    seen, out = set(), []
-    for f in files:
-        for e in load_roster(f, active_only=active_only):
-            if e.code in seen:
-                continue
-            seen.add(e.code)
-            out.append(e)
-    return out
-
-
-def suggest_roster(name, subset, limit=3):
-    """番割の表示名(主に外国人カナ)に近い名簿社員を推測して候補文字列を返す。
-
-    名簿の氏名トークン/フリガナトークンと、表示名が前方一致または部分一致するものを拾う。
-    返り値は 'コード:氏名 / コード:氏名' 形式(無ければ空文字)。
-    """
-    n = _norm(name)
-    if len(n) < 2:
-        return ""
-    out, seen = [], set()
-    for e in subset:
-        toks = [_norm(t) for t in re.split(r"[　 ]+", e.name.strip())]
-        toks += [_norm(t) for t in e.furi.split()]
-        for t in toks:
-            if len(t) < 2:
-                continue
-            if t.startswith(n) or n.startswith(t) or n in t or t in n:
-                if e.code not in seen:
-                    seen.add(e.code)
-                    out.append(f"{e.code}:{e.name}")
-                break
-    return " / ".join(out[:limit])
-
-
 class Matcher:
     """ある営業所(home)について、番割の (表示名, 背景色) → 区分 を判定する。
 
     区分: 'home'(自営業所) / 'other'(他営業所応援) / 'ignore'(集計対象外)
 
     判定は **氏名セルの背景色(worker_colors) と手動補正(name_aliases) だけ** で行う。
-    名簿(CSV)は判定に使わない。優先順位:
+    優先順位:
       1. 手動補正(name_aliases) … 最優先
       2. 氏名セルの背景色(worker_colors)
 
     色が未割当・採色できなかった人は既定で「対象外」にし、備考で確認を促す
     (本当は自社の白セルなら『色判定』タブで色を登録すれば拾える)。
-
-    名簿(任意)を渡した場合は、自社と判定した人の名簿コードを参考に解決するだけに使う
-    (在籍数の参考・対照表のコード表示用。判定そのものには影響しない)。
     """
 
-    def __init__(self, home_key, roster_subset=None, aliases=None, colormap=None):
+    def __init__(self, home_key, aliases=None, colormap=None):
         self.home = home_key
         self.aliases = aliases or {}
         self.colormap = colormap        # worker_color.ColorMap or None
-        self.full = {}       # 正規化フルネーム -> code (名簿があれば。参考用)
-        self.kana_tok = {}   # 外国人カナトークン -> code
-        for e in (roster_subset or []):
-            self.full.setdefault(_norm(e.name), e.code)
-            toks = [t for t in re.split(r"[　 ]+", e.name.strip()) if len(t) >= 2]
-            toks += [t for t in e.furi.split() if len(t) >= 2]
-            for t in toks:
-                if _is_kana(t):
-                    self.kana_tok.setdefault(_norm(t), e.code)
-
-    def in_roster(self, name):
-        """名簿コードを参考解決する(判定には使わない)。無ければ None。"""
-        n = _norm(name)
-        if n in self.full:
-            return self.full[n]
-        if _is_kana(name) and n in self.kana_tok:
-            return self.kana_tok[n]
-        return None
 
     def classify(self, name, bg=""):
         """(区分, 名簿コード, 備考) を返す。色(+手動補正)だけで判定する。
@@ -252,13 +130,14 @@ class Matcher:
                 return "other", None, "手動:他営業所"
             if v in ("ignore", "対象外", ""):
                 return "ignore", None, "手動:対象外"
-            if v in ("home", "自社"):   # 名簿コード無しの自社登録(名簿が無い運用向け)
+            if v in ("home", "自社"):
                 return "home", None, "手動:自社"
+            # 上記以外の値は旧形式の社員コード。同一人物の名寄せキーとして残す
             return "home", v, "手動:自社"
 
         ck = self.colormap.classify(bg) if self.colormap else None
         if ck == "home":
-            return "home", self.in_roster(name), "色:自社"
+            return "home", None, "色:自社"
         if ck == "other":
             return "other", None, "色:他営業所応援"
         if ck == "ignore":
@@ -276,20 +155,18 @@ def is_excluded(customer, site, cust_kw, site_kw):
             or any(k in (site or "") for k in site_kw))
 
 
-def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
+def compute_board(office, date, rows, cust_kw, site_kw, aliases,
                   staff=None, colormap=None):
     """1つの番割(office, date)の稼働率レポートを返す。
 
     rows:   [{customer, site, worker, badge, bg}]
-    roster: 名簿(任意・参考用)。在籍数の参考と名簿コードの解決にだけ使う(判定には使わない)。
     staff:  事務所スタッフ等のキー集合(コード/正規化氏名)。番割に出ないなら分母から除く。
     colormap: worker_color.ColorMap。氏名の背景色で自社/他社を判定する(これが主判定)。
     """
     staff = staff or set()
     home = office_key(office)
-    subset = [e for e in (roster or []) if e.office == home]
     colormap_empty = not colormap   # 色判定が未設定(=ほぼ全員が対象外になる)
-    matcher = Matcher(home, subset, aliases, colormap)
+    matcher = Matcher(home, aliases, colormap)
 
     home_on, home_rev, home_ovh = set(), set(), set()
     home_standby = set()              # 待機・休み枠に割り当てられた自営業所社員(分母内)
@@ -321,7 +198,6 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
         key = code or worker
         exc = is_excluded(cust, site, cust_kw, site_kw)
         if kind == "home":
-            # 色=自社(または待機/休み枠・手動補正)。名簿があればコードを参考に付ける。
             home_on.add(key)
             home_name[key] = worker
             home_rows[key] += 1
@@ -369,8 +245,7 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
             review[worker] = {"priority": reason[0], "office": office, "date": date,
                               "worker": worker, "badge": badge, "bg": bg,
                               "current": reason[1],
-                              "customer": cust, "site": site, "hint": reason[2],
-                              "suggest": suggest_roster(worker, subset)}
+                              "customer": cust, "site": site, "hint": reason[2]}
 
     # 同じ表示名が同じ番割に複数行出ている自社作業員は1名に畳んで数えている
     # (掛け持ちなら正しい)。同姓同名の「別人」だった場合は分母が過小になるので、
@@ -386,8 +261,7 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
                          "current": f"自社1名として集計(同名{cnt}行)",
                          "customer": " / ".join(home_places[key][:3]), "site": "",
                          "hint": "同一人物の掛け持ちなら問題なし。同姓同名の別人なら"
-                                 "分母が1名少ない(名簿コードで確認を)",
-                         "suggest": suggest_roster(wname, subset)}
+                                 "分母が1名少ない(番割で本人確認を)"}
 
     # 分母 = 番割に名前のある自社(現場 + 待機/休み枠)。名簿にいても番割に名前が
     # なければ分母に入れない。待機/休み枠は分母に入れるが外貨/管理費には入れない。
@@ -397,9 +271,6 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
     standby = len(home_standby)      # 待機/休み枠(分母内・非稼働)
     standby_taiki = len(home_taiki)  # うち待機
     standby_yasumi = len(home_yasumi)  # うち休み/留守
-    roster_size = len(subset)        # 在籍(名簿の在籍社員数。参考)
-    roster_on = sum(1 for e in subset if e.code in home_on)
-    absent = roster_size - roster_on  # 名簿在籍だが番割に名前なし(分母外・参考)
     denominator = present
     rate = (num / denominator) if denominator else 0.0
     # 実働率 = 外貨 ÷ (出勤 − 休み)。休みは管理で動かせないので分母から除き、
@@ -415,11 +286,10 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
     return {
         "office": office, "date": date,
         "colormap_empty": colormap_empty,
-        "roster_size": roster_size,
         "denominator": denominator, "present": present,
         "revenue": num, "overhead_only": ovh_only,
         "standby": standby, "standby_taiki": standby_taiki,
-        "standby_yasumi": standby_yasumi, "absent": absent,
+        "standby_yasumi": standby_yasumi,
         "rate": rate, "lent_out": len(home_lent),
         "denominator_active": denominator_active, "rate_active": rate_active,
         "overhead_names": sorted(home_name[k] for k in (home_ovh - home_rev)),
@@ -479,12 +349,25 @@ def render_board(r):
     return "\n".join(L)
 
 
-HISTORY_HEADER = ["日付", "営業所", "在籍", "出勤(分母)", "外貨(分子)",
-                  "管理費", "待機休み", "番割なし(参考)", "稼働率%", "実働率%",
+HISTORY_HEADER = ["日付", "営業所", "出勤(分母)", "外貨(分子)",
+                  "管理費", "待機休み", "稼働率%", "実働率%",
                   "他営業所応援", "対象外"]
-# 実働率% 追加前の旧ヘッダ(既存CSVの読み替え用)
-_OLD_HISTORY_HEADER = HISTORY_HEADER[:9] + HISTORY_HEADER[10:]
-_RATE_ACTIVE_COL = 9   # 実働率% の列位置(旧形式の行にはここへ空欄を挿す)
+
+
+def _migrate_history_rows(header, rows):
+    """旧形式の履歴行を、列名の対応で現行ヘッダの並びに読み替える。
+
+    旧形式で存在した「在籍」「番割なし(参考)」(名簿由来)は捨て、現行に無い列は
+    空欄にする。ヘッダが現行と同一ならそのまま返す。
+    """
+    if header == HISTORY_HEADER:
+        return rows
+    idx = {name: i for i, name in enumerate(header)}
+    out = []
+    for r in rows:
+        out.append([r[idx[c]] if c in idx and idx[c] < len(r) else ""
+                    for c in HISTORY_HEADER])
+    return out
 
 COMPANY_TOTAL_LABEL = "全社合計"
 
@@ -501,9 +384,9 @@ def company_totals(reports):
         if not r.get("is_total"):
             by_date[r["date"]].append(r)
     totals = []
-    sum_keys = ("roster_size", "denominator", "present", "revenue",
+    sum_keys = ("denominator", "present", "revenue",
                 "overhead_only", "standby", "standby_taiki", "standby_yasumi",
-                "absent", "lent_out", "other_total", "other_revenue", "ignored")
+                "lent_out", "other_total", "other_revenue", "ignored")
     for date, rs in sorted(by_date.items()):
         if len(rs) < 2:
             continue
@@ -566,7 +449,7 @@ def render_support_matrix(reports):
 def append_history(path, reports):
     """日次履歴CSVに追記する。同じ(日付,営業所)は最新で置き換える。
 
-    実働率% 追加前の旧形式のCSVは、読み込み時にその列へ空欄を挿して新形式に揃える。
+    旧形式のCSV(在籍・番割なし列あり/実働率なし)は列名の対応で自動移行する。
     """
     path = Path(path)
     existing = []
@@ -574,11 +457,8 @@ def append_history(path, reports):
         with open(path, encoding="cp932", errors="replace", newline="") as f:
             rdr = csv.reader(f)
             rows = list(rdr)
-        if rows and rows[0] == _OLD_HISTORY_HEADER:
-            existing = [r[:_RATE_ACTIVE_COL] + [""] + r[_RATE_ACTIVE_COL:]
-                        for r in rows[1:]]
-        else:
-            existing = rows[1:] if rows else []
+        if rows:
+            existing = _migrate_history_rows(rows[0], rows[1:])
     keep = []
     new_keys = {(r["date"], r["office"]) for r in reports}
     for row in existing:
@@ -586,8 +466,8 @@ def append_history(path, reports):
             continue  # 同じ日付・営業所の古い行は捨てて入れ替え
         keep.append(row)
     for r in reports:
-        keep.append([r["date"], r["office"], r["roster_size"], r["present"],
-                     r["revenue"], r["overhead_only"], r["standby"], r["absent"],
+        keep.append([r["date"], r["office"], r["present"],
+                     r["revenue"], r["overhead_only"], r["standby"],
                      f"{r['rate'] * 100:.1f}", f"{r.get('rate_active', 0) * 100:.1f}",
                      r["other_total"], r["ignored"]])
     keep.sort(key=lambda x: (str(x[0]), str(x[1])))
@@ -706,14 +586,13 @@ def read_assignments(select=None, colormap=None, log=print, snapshot=True):
     return assignments
 
 
-def analyze_assignments(assignments, roster_paths=None, cust_kw=None, site_kw=None,
+def analyze_assignments(assignments, cust_kw=None, site_kw=None,
                         aliases=None, staff=None, colormap=None):
     """割当リストから (営業所,日付)ごとのレポート一覧を返す(純粋計算)。
 
     割当の出どころは問わない: 番割の読み取り(read_assignments)・スナップショット
     (load_snapshots)・inspectダンプ(assignments_from_inspect)・GUIのメモリ保持。
     """
-    roster = load_rosters(roster_paths, active_only=True) if roster_paths else []
     if aliases is None:
         aliases = load_aliases()
     if colormap is None:
@@ -729,19 +608,18 @@ def analyze_assignments(assignments, roster_paths=None, cust_kw=None, site_kw=No
         boards[(a.get("office", ""), a.get("date", ""))].append(a)
     reports = []
     for (office, date), rows in sorted(boards.items()):
-        reports.append(compute_board(office, date, rows, roster,
+        reports.append(compute_board(office, date, rows,
                                      cust_kw, site_kw, aliases, staff_keys,
                                      colormap=colormap))
     return reports
 
 
-def analyze(roster_paths=None, inspect_path=None, cust_kw=None, site_kw=None,
+def analyze(inspect_path=None, cust_kw=None, site_kw=None,
             aliases=None, staff=None, select=None, colormap=None,
             snapshot_paths=None, log=print):
     """番割から (営業所,日付)ごとのレポート一覧を返す。GUI/CLI 共通の入口。
 
-    判定は氏名の背景色(worker_colors)で行う。名簿(roster_paths)は任意で、渡せば
-    在籍数の参考と名簿コードの解決にだけ使う(判定には影響しない)。
+    判定は氏名の背景色(worker_colors)で行う。
 
     select: None なら開いている全番割を集計。(営業所, 日付) のタプル集合を渡すと、
             その番割だけを集計する(inspect_path 指定時は無視)。
@@ -757,7 +635,7 @@ def analyze(roster_paths=None, inspect_path=None, cust_kw=None, site_kw=None,
         assignments = load_snapshots(snapshot_paths)
     else:
         assignments = read_assignments(select=select, colormap=colormap, log=log)
-    return analyze_assignments(assignments, roster_paths, cust_kw, site_kw,
+    return analyze_assignments(assignments, cust_kw, site_kw,
                                aliases, staff, colormap)
 
 
@@ -920,10 +798,10 @@ def write_outputs(reports, out_path=None, csv_path=None,
     with open(review_path, "w", encoding="cp932", errors="replace", newline="") as f:
         w = csv.writer(f)
         w.writerow(["優先", "営業所", "日付", "氏名(対照表のキー)", "バッジ", "背景色",
-                    "現在の判定", "推奨コード候補", "顧客", "現場", "対応のヒント"])
+                    "現在の判定", "顧客", "現場", "対応のヒント"])
         for x in review:
             w.writerow([x["priority"], x["office"], x["date"], x["worker"], x["badge"],
-                        x.get("bg", ""), x["current"], x.get("suggest", ""),
+                        x.get("bg", ""), x["current"],
                         x["customer"], x["site"], x["hint"]])
 
     n_check = sum(1 for x in review if x["priority"] == "要確認")
@@ -933,9 +811,6 @@ def write_outputs(reports, out_path=None, csv_path=None,
 
 def main():
     ap = argparse.ArgumentParser(description="作業員稼働率の集計(営業所ごと)")
-    ap.add_argument("--roster", nargs="*", default=None,
-                    help="(任意)社員名簿CSV(Shift-JIS)。判定は背景色で行うので必須ではない。"
-                         "渡すと在籍数の参考・名簿コード解決に使う。フォルダ可")
     ap.add_argument("--inspect", help="workers_inspect.txt から計算(指定時は番割を読まない)")
     ap.add_argument("--snapshot", nargs="*", default=None,
                     help="スナップショットCSV(snapshots/ のファイル/フォルダ)から再集計。"
@@ -962,7 +837,7 @@ def main():
     snapshot_paths = args.snapshot if args.snapshot else None
     if args.snapshot is not None and not args.snapshot:
         snapshot_paths = [SNAPSHOT_DIR]   # --snapshot 引数なし = snapshots/ 全部
-    reports = analyze(args.roster, inspect_path=args.inspect,
+    reports = analyze(inspect_path=args.inspect,
                       cust_kw=cust_kw, site_kw=site_kw, aliases=aliases,
                       snapshot_paths=snapshot_paths)
     reports = reports + company_totals(reports)

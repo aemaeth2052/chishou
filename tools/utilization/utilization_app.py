@@ -5,7 +5,7 @@
 除外キーワード(例外リスト)と対照表(外国人ニックネーム)も画面で編集できる。
 
 タブ:
-  集計     : 名簿の指定 → 「番割から集計」→ 営業所ごとの稼働率を表示
+  集計     : 「番割から集計」→ 営業所ごとの稼働率を表示(行ダブルクリックで明細)
   除外設定 : 外貨を産まない顧客/現場のキーワード(部分一致)を編集
   対照表   : 取りこぼし候補を見て、自社/他営業所/対象外を割り当て(name_aliases.json)
   履歴     : utilization_history.csv の推移を表示
@@ -68,13 +68,11 @@ class App:
         root.geometry("960x640")
 
         self.cfg = load_app_config()
-        self.roster_paths = list(self.cfg.get("roster_paths", []))
         self.aliases = U.load_aliases()
         self.settings = U.load_settings(U.SETTINGS_PATH)
         self.last_review = []
         self.last_reports = []       # 直近の集計結果(明細ドリルダウン用)
         self.last_assignments = []   # 直近の読み取り結果(設定変更時の即再計算用)
-        self.roster_index = {}   # コード -> Employee (対照表の営業所表示用)
         self.q = queue.Queue()
         self.detail_win = None       # 明細ウィンドウ(開いていれば再集計時に更新)
         self.detail_key = None
@@ -107,18 +105,8 @@ class App:
     # ----------------------------------------------------------- 集計タブ
     def _build_run(self):
         f = self.tab_run
-        top = ttk.LabelFrame(f, text="社員名簿(任意・参考用。判定は『色判定』タブの背景色で行う)")
-        top.pack(fill="x", padx=8, pady=6)
-        self.lst_roster = tk.Listbox(top, height=4)
-        self.lst_roster.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-        for p in self.roster_paths:
-            self.lst_roster.insert("end", p)
-        btns = ttk.Frame(top)
-        btns.pack(side="left", fill="y", padx=4, pady=6)
-        ttk.Button(btns, text="CSV追加", command=self._add_roster_file).pack(fill="x", pady=2)
-        ttk.Button(btns, text="フォルダ追加", command=self._add_roster_dir).pack(fill="x", pady=2)
-        ttk.Button(btns, text="削除", command=self._del_roster).pack(fill="x", pady=2)
-
+        ttk.Label(f, text="自社/他社の判定は『色判定』タブの背景色と対照表で行います。"
+                  ).pack(anchor="w", padx=8, pady=(8, 0))
         run = ttk.Frame(f)
         run.pack(fill="x", padx=8, pady=4)
         self.btn_run = ttk.Button(run, text="番割から集計する",
@@ -131,12 +119,12 @@ class App:
         ttk.Button(run, text="出力フォルダを開く",
                    command=self._open_folder).pack(side="right")
 
-        cols = ("営業所", "日付", "リスト", "在籍(分母)", "外貨", "休み・待機",
+        cols = ("営業所", "日付", "出勤(分母)", "外貨", "休み・待機",
                 "稼働率%", "実働率%", "貸出", "他営業所応援", "対象外")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=10)
         for c in cols:
             self.tree.heading(c, text=c)
-            w = 150 if c == "営業所" else (70 if c in ("日付", "在籍(分母)", "休み・待機") else 60)
+            w = 150 if c == "営業所" else (70 if c in ("日付", "出勤(分母)", "休み・待機") else 60)
             self.tree.column(c, width=w, anchor="center")
         self.tree.column("営業所", anchor="w")
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
@@ -147,40 +135,13 @@ class App:
         self.log = scrolledtext.ScrolledText(f, height=7)
         self.log.pack(fill="both", expand=False, padx=8, pady=6)
 
-    def _add_roster_file(self):
-        paths = filedialog.askopenfilenames(
-            title="名簿CSVを選択", filetypes=[("CSV", "*.csv"), ("すべて", "*.*")])
-        for p in paths:
-            if p not in self.roster_paths:
-                self.roster_paths.append(p)
-                self.lst_roster.insert("end", p)
-        self._save_cfg()
-
-    def _add_roster_dir(self):
-        d = filedialog.askdirectory(title="名簿CSVの入ったフォルダを選択")
-        if d and d not in self.roster_paths:
-            self.roster_paths.append(d)
-            self.lst_roster.insert("end", d)
-            self._save_cfg()
-
-    def _del_roster(self):
-        sel = list(self.lst_roster.curselection())
-        for i in reversed(sel):
-            self.lst_roster.delete(i)
-            del self.roster_paths[i]
-        self._save_cfg()
-
-    def _save_cfg(self):
-        self.cfg["roster_paths"] = self.roster_paths
-        save_app_config(self.cfg)
-
     def _logmsg(self, s):
         self.log.insert("end", s + "\n")
         self.log.see("end")
 
     def _run_live(self):
-        # 開いている番割を列挙し、対象を選ばせてから集計する
-        # 判定は背景色で行うので名簿は任意。色設定が無い場合だけ注意を促す。
+        # 開いている番割を列挙し、対象を選ばせてから集計する。
+        # 色設定が無い場合だけ注意を促す(未設定だと全員が対象外になるため)。
         if not WC.load_color_map():
             if not messagebox.askokcancel(
                     "色判定が未設定",
@@ -282,7 +243,6 @@ class App:
         dlg.protocol("WM_DELETE_WINDOW", on_cancel)
 
     def _start_compute(self, inspect_path=None, select=None, snapshot_paths=None):
-        # 名簿は任意(判定は背景色)。roster_paths が空でも集計できる。
         self.btn_run.config(state="disabled")
         self._logmsg("集計を開始します...")
         # 最新の対照表・除外設定を読み直して使う
@@ -311,7 +271,7 @@ class App:
     def _compute_and_report(self, assignments, gs):
         """割当リスト→集計→ファイル出力→画面更新(ワーカースレッドで呼ぶ)。"""
         reports = U.analyze_assignments(
-            assignments, self.roster_paths,
+            assignments,
             cust_kw=self.settings["exclude_customer_keywords"],
             site_kw=self.settings["exclude_site_keywords"],
             aliases=self.aliases)
@@ -400,13 +360,12 @@ class App:
             self.tree.delete(i)
         for r in reports:
             self.tree.insert("", "end", values=(
-                r["office"], r["date"], r["roster_size"], r["present"],
+                r["office"], r["date"], r["present"],
                 r["revenue"], r["standby"],
                 f"{r['rate'] * 100:.1f}", f"{r.get('rate_active', 0) * 100:.1f}",
                 r["lent_out"], r["other_total"], r["ignored"]))
         self.last_reports = reports
         self.last_review = review
-        self._load_roster_index()
         self._refresh_review()
         n_open = nchk + nreco
         try:
@@ -468,14 +427,9 @@ class App:
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(2, 10))
-        ttk.Label(bar, text="選択した作業員を:  割当先(社員コード・空欄可)").pack(side="left")
-        self.detail_code = ttk.Combobox(bar, width=30)
-        self.detail_code.configure(postcommand=lambda: self.detail_code.configure(
-            values=self._code_options(self.detail_key[0] if self.detail_key else "",
-                                      self.detail_code.get())))
-        self.detail_code.pack(side="left", padx=4)
+        ttk.Label(bar, text="選択した作業員を:").pack(side="left")
         ttk.Button(bar, text="自社として登録",
-                   command=lambda: self._detail_assign("code")).pack(side="left", padx=2)
+                   command=lambda: self._detail_assign("home")).pack(side="left", padx=2)
         ttk.Button(bar, text="他営業所応援",
                    command=lambda: self._detail_assign("other")).pack(side="left", padx=2)
         ttk.Button(bar, text="対象外",
@@ -517,17 +471,9 @@ class App:
                 return
             self.aliases.pop(name, None)
             shown = "削除"
-        elif mode == "code":
-            val = self._code_from_text(self.detail_code.get())
-            if not val:
-                val = "home"      # コード無しの自社登録
-                shown = "自社(コードなし)"
-            else:
-                shown = f"自社({val})"
-            self.aliases[name] = val
         else:
             self.aliases[name] = mode
-            shown = "他営業所応援" if mode == "other" else "対象外"
+            shown = {"home": "自社", "other": "他営業所応援", "ignore": "対象外"}[mode]
         U.save_aliases(self.aliases)
         self._refresh_alias_list()
         self._logmsg(f"対照表を更新: {name} → {shown}")
@@ -757,14 +703,13 @@ class App:
     # ----------------------------------------------------------- 対照表タブ
     def _build_alias(self):
         f = self.tab_alias
-        ttk.Label(f, text="取りこぼし候補(集計を実行すると表示)。行を選び、下のボタンで登録します。\n"
-                  "割当先 = 名簿(Hks)の社員コード。名簿を指定していれば▼から選べます"
-                  "(その番割の営業所の社員が先頭)。名簿が無ければ空欄のまま『自社として登録』も可。"
+        ttk.Label(f, text="取りこぼし候補(集計を実行すると表示)。"
+                  "行を選び、下のボタンで自社/他営業所/対象外を登録します(即再集計)。"
                   ).pack(anchor="w", padx=8, pady=6)
 
-        cols = ("優先", "氏名", "営業所", "バッジ", "現在の判定", "推奨コード候補", "現場")
+        cols = ("優先", "氏名", "営業所", "バッジ", "現在の判定", "現場")
         widths = {"優先": 70, "氏名": 110, "営業所": 140, "バッジ": 70,
-                  "現在の判定": 130, "推奨コード候補": 160, "現場": 150}
+                  "現在の判定": 160, "現場": 170}
         self.tree_rev = ttk.Treeview(f, columns=cols, show="headings", height=8)
         for c in cols:
             self.tree_rev.heading(c, text=c)
@@ -778,20 +723,9 @@ class App:
 
         row = ttk.Frame(f)
         row.pack(fill="x", padx=8, pady=4)
-        ttk.Label(row, text="割当先(社員コード):").pack(side="left")
-        self._alias_board_office = ""
-        self.ent_code = ttk.Combobox(row, width=34)
-        self.ent_code.configure(postcommand=lambda: self.ent_code.configure(
-            values=self._code_options(self._alias_board_office,
-                                      self.ent_code.get())))
-        self.ent_code.pack(side="left", padx=4)
-        self.ent_code.bind("<KeyRelease>", lambda _e: self._refresh_code_label())
-        self.ent_code.bind("<<ComboboxSelected>>", lambda _e: self._refresh_code_label())
-        self.var_code_resolved = tk.StringVar(value="")
-        ttk.Label(row, textvariable=self.var_code_resolved, width=30).pack(
-            side="left", padx=4)
+        ttk.Label(row, text="選択した候補を:").pack(side="left")
         ttk.Button(row, text="自社として登録",
-                   command=lambda: self._assign("code")).pack(side="left", padx=2)
+                   command=lambda: self._assign("home")).pack(side="left", padx=2)
         ttk.Button(row, text="他営業所応援",
                    command=lambda: self._assign("other")).pack(side="left", padx=2)
         ttk.Button(row, text="対象外",
@@ -802,71 +736,13 @@ class App:
         self.tree_al = ttk.Treeview(cur, columns=("氏名", "割当"), show="headings",
                                     height=7)
         self.tree_al.heading("氏名", text="氏名")
-        self.tree_al.heading("割当", text="割当(社員コード / home=自社 / other / ignore)")
+        self.tree_al.heading("割当", text="割当(home=自社 / other / ignore)")
         self.tree_al.column("氏名", width=200, anchor="w")
         self.tree_al.column("割当", width=260, anchor="w")
         self.tree_al.pack(side="left", fill="both", expand=True, padx=6, pady=6)
         ttk.Button(cur, text="選択を削除", command=self._del_alias).pack(
             side="left", padx=4)
-        self._load_roster_index()
         self._refresh_alias_list()
-
-    def _load_roster_index(self):
-        """名簿を読み、コード -> Employee の辞書を作る(対照表の営業所表示用)。"""
-        self.roster_index = {}
-        if not self.roster_paths:
-            return
-        try:
-            for e in U.load_rosters(self.roster_paths, active_only=False):
-                self.roster_index[e.code] = e
-        except Exception:
-            pass  # 名簿が未指定/不正でも対照表自体は使えるようにする
-
-    @staticmethod
-    def _code_option_str(e):
-        return f"{e.code}  {e.name.strip()}（{e.office or '営業所不明'}）"
-
-    @staticmethod
-    def _code_from_text(text):
-        """入力欄のテキストから社員コードを取り出す。
-
-        プルダウン選択なら「コード  氏名（営業所）」形式なので先頭トークン、
-        手入力ならそのままコードとして扱う。
-        """
-        return (text or "").strip().split()[0] if (text or "").strip() else ""
-
-    def _code_options(self, board_office="", query=""):
-        """割当先プルダウンの選択肢(コード 氏名（営業所）)を返す。
-
-        その番割の営業所の社員を先頭に並べる。query(入力途中のテキスト)が
-        あればコード/氏名の部分一致で絞り込む。選択済みの完全な行は絞らない。
-        """
-        q = (query or "").strip()
-        if "（" in q:      # 既に選択済みの表示形式 → 全件を出し直す
-            q = ""
-        bo = U.office_key(board_office)
-        opts_board, opts_rest = [], []
-        for e in self.roster_index.values():
-            s = self._code_option_str(e)
-            if q and q not in s:
-                continue
-            (opts_board if bo and e.office == bo else opts_rest).append(s)
-        return sorted(opts_board) + sorted(opts_rest)
-
-    def _code_office(self, code):
-        """コードを名簿で解決して Employee を返す(無ければ None)。"""
-        return self.roster_index.get((code or "").strip())
-
-    def _refresh_code_label(self):
-        """入力中のコードを名簿で解決し「→ 氏名(営業所)」をライブ表示。"""
-        code = self._code_from_text(self.ent_code.get())
-        e = self._code_office(code)
-        if not code:
-            self.var_code_resolved.set("（空欄=コード無しで自社登録）")
-        elif e:
-            self.var_code_resolved.set(f"→ {e.name.strip()}（{e.office or '営業所不明'}）")
-        else:
-            self.var_code_resolved.set("→ ⚠ 名簿に無いコード")
 
     def _on_rev_select(self, _evt):
         sel = self.tree_rev.selection()
@@ -874,19 +750,11 @@ class App:
             return
         vals = self.tree_rev.item(sel[0], "values")
         name = vals[1] if len(vals) > 1 else ""
-        self._alias_board_office = vals[2] if len(vals) > 2 else ""
-        suggest = vals[5] if len(vals) > 5 else ""
-        code = suggest.split(":", 1)[0].strip() if suggest else ""
-        self.ent_code.delete(0, "end")
-        if code:
-            e = self._code_office(code)
-            self.ent_code.insert(0, self._code_option_str(e) if e else code)
         rev = next((x for x in self.last_review if x["worker"] == name), None)
         if rev:
             self.var_sel.set(
                 f"選択中: {rev['worker']}　／　番割の営業所: {rev['office']}"
                 f"（{rev['date']}）　／　現在: {rev['current']}")
-        self._refresh_code_label()
 
     def _assign(self, mode):
         sel = self.tree_rev.selection()
@@ -896,50 +764,15 @@ class App:
         vals = self.tree_rev.item(sel[0], "values")
         name = vals[1]
         board_office = vals[2] if len(vals) > 2 else ""
-        if mode == "code":
-            val = self._code_from_text(self.ent_code.get())
-            if not val:
-                # コード無しの自社登録(名簿を使わない運用)。判定は「自社」で確定し、
-                # 名簿コードには紐づけない。
-                if not messagebox.askokcancel(
-                        "自社として登録",
-                        f"{name} を 自社 として登録します(社員コードなし)。\n"
-                        f"（出ている番割: {board_office}）\n\n再集計で反映されます。"):
-                    return
-                val = "home"
-                self.aliases[name] = val
-                U.save_aliases(self.aliases)
-                self._refresh_alias_list()
-                self._logmsg(f"対照表に登録: {name} → 自社(コードなし)")
-                self._recompute_from_memory("対照表に登録")
-                return
-            e = self._code_office(val)
-            if e:
-                detail = (f"{name} を 自社 として登録します。\n\n"
-                          f"割当コード {val} = {e.name.strip()}（{e.office or '営業所不明'}）\n"
-                          f"この人が出ている番割: {board_office}\n\n再集計で反映されます。")
-                bo = U.office_key(board_office)
-                if e.office and bo and e.office != bo:
-                    detail += (f"\n\n⚠ 注意: コードの営業所（{e.office}）と"
-                               f"番割の営業所（{bo}）が一致していません。"
-                               "別人のコードを入れていないか確認してください。")
-            else:
-                detail = (f"{name} を 自社 として登録します。\n\n"
-                          f"⚠ コード {val} は名簿に見つかりません。コードを確認してください。\n"
-                          f"この人が出ている番割: {board_office}\n\n再集計で反映されます。")
-            if not messagebox.askokcancel("自社として登録", detail):
-                return
-        else:
-            val = mode  # 'other' / 'ignore'
-            label = "他営業所応援" if mode == "other" else "対象外"
-            if not messagebox.askokcancel(
-                    label, f"{name} を 「{label}」 として登録します。\n"
-                           f"（出ている番割: {board_office}）\n\n再集計で反映されます。"):
-                return
-        self.aliases[name] = val
+        label = {"home": "自社", "other": "他営業所応援", "ignore": "対象外"}[mode]
+        if not messagebox.askokcancel(
+                label, f"{name} を 「{label}」 として登録します。\n"
+                       f"（出ている番割: {board_office}）\n\n再集計で反映されます。"):
+            return
+        self.aliases[name] = mode
         U.save_aliases(self.aliases)
         self._refresh_alias_list()
-        self._logmsg(f"対照表に登録: {name} → {val}")
+        self._logmsg(f"対照表に登録: {name} → {label}")
         self._recompute_from_memory("対照表に登録")
 
     def _refresh_review(self):
@@ -948,7 +781,7 @@ class App:
         for x in self.last_review:
             self.tree_rev.insert("", "end", values=(
                 x["priority"], x["worker"], x["office"], x["badge"], x["current"],
-                x.get("suggest", ""), x["site"]))
+                x["site"]))
 
     def _refresh_alias_list(self):
         for i in self.tree_al.get_children():

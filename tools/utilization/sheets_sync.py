@@ -32,8 +32,8 @@ def _rows_from_reports(reports):
     """reports → 履歴行(HISTORY_HEADER と同じ並び)。"""
     out = []
     for r in reports:
-        out.append([r["date"], r["office"], r["roster_size"], r["present"],
-                    r["revenue"], r["overhead_only"], r["standby"], r["absent"],
+        out.append([r["date"], r["office"], r["present"],
+                    r["revenue"], r["overhead_only"], r["standby"],
                     round(r["rate"] * 100, 1),
                     round(r.get("rate_active", 0) * 100, 1),
                     r["other_total"], r["ignored"]])
