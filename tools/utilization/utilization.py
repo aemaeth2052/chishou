@@ -940,6 +940,9 @@ def main():
                     help="日次履歴CSVの保存先(同じ日付・営業所は上書き)")
     ap.add_argument("--review", default=str(REVIEW_PATH),
                     help="取りこぼし候補CSVの保存先")
+    ap.add_argument("--gsheet", action="store_true",
+                    help="集計後にGoogleスプレッドシートへ履歴をupsertする"
+                         "(GUIの『Google連携』タブで保存した設定を使う。自動実行用)")
     args = ap.parse_args()
 
     aliases = load_aliases()
@@ -954,9 +957,29 @@ def main():
     reports = analyze(args.roster, inspect_path=args.inspect,
                       cust_kw=cust_kw, site_kw=site_kw, aliases=aliases,
                       snapshot_paths=snapshot_paths)
+    reports = reports + company_totals(reports)
 
     out_text, review, n_check, n_reco = write_outputs(
         reports, args.out, args.csv, args.history, args.review)
+
+    if args.gsheet:
+        gs = {}
+        cfg_path = HERE / "utilization_app_config.json"
+        if cfg_path.exists():
+            try:
+                gs = json.loads(cfg_path.read_text(encoding="utf-8")).get("gsheet", {})
+            except Exception:
+                gs = {}
+        if gs.get("sa_json") and gs.get("spreadsheet"):
+            try:
+                import sheets_sync
+                sheets_sync.sync_history(reports, gs["sa_json"], gs["spreadsheet"],
+                                         gs.get("worksheet", "稼働率履歴"))
+            except Exception as e:
+                print(f"Googleシート更新に失敗: {e}", file=sys.stderr)
+        else:
+            print("Google連携が未設定です(GUIの『Google連携』タブで設定・保存してください)",
+                  file=sys.stderr)
     print()
     print(out_text)
 

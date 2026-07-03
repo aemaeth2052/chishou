@@ -33,6 +33,16 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 APP_CONFIG = HERE / "utilization_app_config.json"
 
+# 履歴グラフの系列色(営業所名の固定順で割当・途中で塗り替えない)。
+# 色覚多様性を考慮した検証済みの並び。全社合計だけは中立グレーの太線で別扱い。
+CHART_PALETTE = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
+                 "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]
+CHART_FALLBACK = "#8a8984"     # 9系列目以降(通常は営業所5つで届かない)
+CHART_TOTAL = "#52514e"        # 全社合計
+CHART_SURFACE = "#fcfcfb"
+CHART_GRID = "#e4e3e0"
+CHART_TEXT = "#52514e"
+
 
 def load_app_config():
     if APP_CONFIG.exists():
@@ -62,11 +72,15 @@ class App:
         self.aliases = U.load_aliases()
         self.settings = U.load_settings(U.SETTINGS_PATH)
         self.last_review = []
+        self.last_reports = []       # 直近の集計結果(明細ドリルダウン用)
         self.last_assignments = []   # 直近の読み取り結果(設定変更時の即再計算用)
         self.roster_index = {}   # コード -> Employee (対照表の営業所表示用)
         self.q = queue.Queue()
+        self.detail_win = None       # 明細ウィンドウ(開いていれば再集計時に更新)
+        self.detail_key = None
 
         nb = ttk.Notebook(root)
+        self.nb = nb
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         self.tab_run = ttk.Frame(nb)
         self.tab_excl = ttk.Frame(nb)
@@ -126,6 +140,9 @@ class App:
             self.tree.column(c, width=w, anchor="center")
         self.tree.column("営業所", anchor="w")
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
+        self.tree.bind("<Double-1>", self._open_detail)
+        ttk.Label(f, text="行をダブルクリックすると作業員ごとの明細を開き、"
+                  "そこから区分の手直しもできます。").pack(anchor="w", padx=10)
 
         self.log = scrolledtext.ScrolledText(f, height=7)
         self.log.pack(fill="both", expand=False, padx=8, pady=6)
@@ -387,13 +404,131 @@ class App:
                 r["revenue"], r["standby"],
                 f"{r['rate'] * 100:.1f}", f"{r.get('rate_active', 0) * 100:.1f}",
                 r["lent_out"], r["other_total"], r["ignored"]))
+        self.last_reports = reports
         self.last_review = review
         self._load_roster_index()
         self._refresh_review()
-        self._logmsg(f"完了: {len(reports)} 営業所。"
+        n_open = nchk + nreco
+        try:
+            self.nb.tab(self.tab_alias,
+                        text=f"対照表 ({n_open})" if n_open else "対照表")
+        except Exception:
+            pass
+        self._logmsg(f"完了: {len(reports)} 件。"
                      f"取りこぼし候補 要確認{nchk} / 確認推奨{nreco} 件 "
-                     f"(対照表タブで割り当て可)")
+                     f"(対照表タブか明細ダブルクリックで割り当て可)")
+        # 明細ウィンドウを開いたまま再集計したら、その中身も追随させる
+        if self.detail_win is not None and self.detail_win.winfo_exists():
+            r = next((x for x in reports
+                      if (x["office"], x["date"]) == self.detail_key), None)
+            if r:
+                self._fill_detail(r)
         self._load_history()
+
+    # ------------------------------------------------- 明細ドリルダウン
+    def _open_detail(self, _evt):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], "values")
+        if len(vals) < 2:
+            return
+        office, date = vals[0], vals[1]
+        r = next((x for x in self.last_reports
+                  if str(x["office"]) == str(office) and str(x["date"]) == str(date)),
+                 None)
+        if r is None:
+            return
+        if r.get("is_total"):
+            messagebox.showinfo("全社合計",
+                                "全社合計に明細はありません。営業所の行を開いてください。")
+            return
+        self._show_detail(r)
+
+    def _show_detail(self, r):
+        if self.detail_win is not None and self.detail_win.winfo_exists():
+            self.detail_win.destroy()
+        win = tk.Toplevel(self.root)
+        self.detail_win = win
+        self.detail_key = (r["office"], r["date"])
+        win.title(f"明細  {r['office']}  {r['date']}")
+        win.geometry("1000x560")
+        ttk.Label(win, text="行を選んで下のボタンで区分を直せます"
+                  "(対照表に保存し、番割を読み直さず即再集計します)。"
+                  ).pack(anchor="w", padx=10, pady=(10, 2))
+        cols = ("作業員", "バッジ", "背景色", "区分", "現場種別", "判定備考", "顧客", "現場")
+        widths = {"作業員": 110, "バッジ": 60, "背景色": 70, "区分": 120,
+                  "現場種別": 70, "判定備考": 140, "顧客": 170, "現場": 170}
+        tv = ttk.Treeview(win, columns=cols, show="headings")
+        for c in cols:
+            tv.heading(c, text=c)
+            tv.column(c, width=widths.get(c, 90), anchor="w")
+        tv.pack(fill="both", expand=True, padx=10, pady=4)
+        self.detail_tree = tv
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(2, 10))
+        ttk.Label(bar, text="選択した作業員を:  割当コード").pack(side="left")
+        self.detail_code = ttk.Entry(bar, width=12)
+        self.detail_code.pack(side="left", padx=4)
+        ttk.Button(bar, text="自社として登録",
+                   command=lambda: self._detail_assign("code")).pack(side="left", padx=2)
+        ttk.Button(bar, text="他営業所応援",
+                   command=lambda: self._detail_assign("other")).pack(side="left", padx=2)
+        ttk.Button(bar, text="対象外",
+                   command=lambda: self._detail_assign("ignore")).pack(side="left", padx=2)
+        ttk.Button(bar, text="割当を削除",
+                   command=lambda: self._detail_assign("del")).pack(side="left", padx=10)
+        self._fill_detail(r)
+
+    def _fill_detail(self, r):
+        tv = self.detail_tree
+        for i in tv.get_children():
+            tv.delete(i)
+        for d in r["details"]:
+            bg = d.get("bg", "")
+            tags = ()
+            if bg:
+                t = "bg_" + bg.lstrip("#")
+                try:
+                    tv.tag_configure(t, background=bg)
+                    tags = (t,)
+                except Exception:
+                    tags = ()
+            tv.insert("", "end", tags=tags, values=(
+                d["worker"], d["badge"], bg, d["kind"], d["field"],
+                d.get("note", ""), d["customer"], d["site"]))
+
+    def _detail_assign(self, mode):
+        tv = self.detail_tree
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("未選択", "明細から行を選んでください。",
+                                parent=self.detail_win)
+            return
+        name = tv.item(sel[0], "values")[0]
+        if mode == "del":
+            if name not in self.aliases:
+                messagebox.showinfo("割当なし", f"{name} は対照表に登録されていません。",
+                                    parent=self.detail_win)
+                return
+            self.aliases.pop(name, None)
+            shown = "削除"
+        elif mode == "code":
+            val = self.detail_code.get().strip()
+            if not val:
+                messagebox.showwarning("コード未入力", "割当先のコードを入れてください。",
+                                       parent=self.detail_win)
+                return
+            self.aliases[name] = val
+            shown = f"自社({val})"
+        else:
+            self.aliases[name] = mode
+            shown = "他営業所応援" if mode == "other" else "対象外"
+        U.save_aliases(self.aliases)
+        self._refresh_alias_list()
+        self._logmsg(f"対照表を更新: {name} → {shown}")
+        self._recompute_from_memory("明細から割当")
 
     def _open_folder(self):
         import subprocess
@@ -783,33 +918,117 @@ class App:
         bar = ttk.Frame(f)
         bar.pack(fill="x", padx=8, pady=6)
         ttk.Button(bar, text="更新", command=self._load_history).pack(side="left")
-        ttk.Label(bar, text="  utilization_history.csv").pack(side="left")
-        self.tree_hist = ttk.Treeview(f, show="headings", height=20)
+        ttk.Label(bar, text="  utilization_history.csv"
+                  "  (折れ線 = 稼働率%・直近30日)").pack(side="left")
+        self.hist_canvas = tk.Canvas(f, height=230, bg=CHART_SURFACE,
+                                     highlightthickness=0)
+        self.hist_canvas.pack(fill="x", padx=8, pady=(0, 4))
+        self.hist_canvas.bind("<Configure>", lambda _e: self._draw_history_chart())
+        self._hist_series = ({}, [])
+        self.tree_hist = ttk.Treeview(f, show="headings", height=12)
         self.tree_hist.pack(fill="both", expand=True, padx=8, pady=4)
         self._load_history()
 
     def _load_history(self):
         path = U.HISTORY_PATH
+        self._hist_series = ({}, [])
         for i in self.tree_hist.get_children():
             self.tree_hist.delete(i)
-        if not Path(path).exists():
-            return
+        rows = []
+        if Path(path).exists():
+            try:
+                with open(path, encoding="cp932", errors="replace", newline="") as fp:
+                    rows = list(csv.reader(fp))
+            except Exception:
+                rows = []
+        if rows:
+            header = rows[0]
+            self.tree_hist["columns"] = header
+            for c in header:
+                self.tree_hist.heading(c, text=c)
+                self.tree_hist.column(c, width=90, anchor="center")
+            self.tree_hist.column(header[1] if len(header) > 1 else header[0],
+                                  width=150, anchor="w")
+            for r in rows[1:]:
+                self.tree_hist.insert("", "end", values=r)
+            self._hist_series = self._parse_history_series(header, rows[1:])
+        self._draw_history_chart()
+
+    @staticmethod
+    def _parse_history_series(header, rows):
+        """履歴の行から {営業所: {日付: 稼働率%}} と日付列(直近30日)を作る。"""
         try:
-            with open(path, encoding="cp932", errors="replace", newline="") as fp:
-                rows = list(csv.reader(fp))
-        except Exception:
+            i_rate = header.index("稼働率%")
+        except ValueError:
+            return {}, []
+        dates = sorted({r[0] for r in rows if len(r) > i_rate and r[0]})[-30:]
+        dset = set(dates)
+        series = {}
+        for r in rows:
+            if len(r) <= i_rate or r[0] not in dset:
+                continue
+            try:
+                v = float(r[i_rate])
+            except ValueError:
+                continue
+            series.setdefault(r[1], {})[r[0]] = v
+        return series, dates
+
+    def _draw_history_chart(self):
+        c = self.hist_canvas
+        c.delete("all")
+        series, dates = self._hist_series
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 120 or H < 80:
             return
-        if not rows:
+        if not series or not dates:
+            c.create_text(W / 2, H / 2, fill=CHART_TEXT,
+                          text="集計を重ねると、ここに稼働率の推移が出ます")
             return
-        header = rows[0]
-        self.tree_hist["columns"] = header
-        for c in header:
-            self.tree_hist.heading(c, text=c)
-            self.tree_hist.column(c, width=90, anchor="center")
-        self.tree_hist.column(header[1] if len(header) > 1 else header[0],
-                              width=150, anchor="w")
-        for r in rows[1:]:
-            self.tree_hist.insert("", "end", values=r)
+        ml, mr, mt, mb = 40, 14, 30, 22
+
+        def px(i):
+            if len(dates) <= 1:
+                return ml + (W - ml - mr) / 2
+            return ml + (W - ml - mr) * i / (len(dates) - 1)
+
+        def py(v):
+            return mt + (H - mt - mb) * (1 - min(max(v, 0), 100) / 100.0)
+
+        for g in (0, 25, 50, 75, 100):
+            y = py(g)
+            c.create_line(ml, y, W - mr, y, fill=CHART_GRID)
+            c.create_text(ml - 6, y, text=str(g), anchor="e",
+                          fill=CHART_TEXT, font=("", 8))
+        c.create_text(px(0), H - mb + 10, text=dates[0], anchor="w",
+                      fill=CHART_TEXT, font=("", 8))
+        if len(dates) > 1:
+            c.create_text(px(len(dates) - 1), H - mb + 10, text=dates[-1],
+                          anchor="e", fill=CHART_TEXT, font=("", 8))
+
+        # 系列色は営業所名の固定順で割当(全社合計はグレー太線)。凡例は上段に並べる。
+        names = sorted(series)
+        normal = [n for n in names if not n.startswith(U.COMPANY_TOTAL_LABEL)]
+        color_of = {}
+        for i, n in enumerate(normal):
+            color_of[n] = (CHART_PALETTE[i] if i < len(CHART_PALETTE)
+                           else CHART_FALLBACK)
+        lx = ml
+        for n in names:
+            is_total = n.startswith(U.COMPANY_TOTAL_LABEL)
+            color = CHART_TOTAL if is_total else color_of[n]
+            width = 3 if is_total else 2
+            pts = [(px(i), py(series[n][d]))
+                   for i, d in enumerate(dates) if d in series[n]]
+            if len(pts) >= 2:
+                c.create_line(*[xy for p in pts for xy in p],
+                              fill=color, width=width)
+            for x, y in pts if len(pts) < 2 else pts[-1:]:
+                c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=color, outline="")
+            c.create_rectangle(lx, 8, lx + 10, 18, fill=color, outline="")
+            t = c.create_text(lx + 14, 13, text=n, anchor="w",
+                              fill="#0b0b0b", font=("", 9))
+            lx = c.bbox(t)[2] + 14
 
     # -------------------------------------------------------- Google連携タブ
     def _build_gsheet(self):
