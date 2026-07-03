@@ -295,6 +295,8 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
     home_yasumi = set()               # うち「休み/留守」枠
     home_lent = set()                 # 宮崎タグ付き=他営業所へ貸出した自営業所社員
     home_name = {}                    # key -> 氏名(表示用)
+    home_rows = defaultdict(int)      # key -> 番割に出た行数(同名重複の検出用)
+    home_places = defaultdict(list)   # key -> 出た場所(重複時の確認表示用)
     oth_on, oth_rev = set(), set()
     oth_office = {}                   # key -> 他営業所キー
     ign = set()
@@ -320,6 +322,8 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
             # 色=自社(または待機/休み枠・手動補正)。名簿があればコードを参考に付ける。
             home_on.add(key)
             home_name[key] = worker
+            home_rows[key] += 1
+            home_places[key].append(cust if is_standby else f"{cust} {site}".strip())
             if is_standby:
                 home_standby.add(key)  # 待機/休み枠 → 分母に入れるが外貨/管理費には入れない
                 if status == "待機" or (not status and "待機" in (cust or "")):
@@ -365,6 +369,23 @@ def compute_board(office, date, rows, roster, cust_kw, site_kw, aliases,
                               "current": reason[1],
                               "customer": cust, "site": site, "hint": reason[2],
                               "suggest": suggest_roster(worker, subset)}
+
+    # 同じ表示名が同じ番割に複数行出ている自社作業員は1名に畳んで数えている
+    # (掛け持ちなら正しい)。同姓同名の「別人」だった場合は分母が過小になるので、
+    # 集計値は変えずに要確認へ出して人間が判断できるようにする。
+    for key, cnt in home_rows.items():
+        if cnt < 2:
+            continue
+        wname = home_name.get(key, str(key))
+        if wname in review:
+            continue
+        review[wname] = {"priority": "確認推奨", "office": office, "date": date,
+                         "worker": wname, "badge": "", "bg": "",
+                         "current": f"自社1名として集計(同名{cnt}行)",
+                         "customer": " / ".join(home_places[key][:3]), "site": "",
+                         "hint": "同一人物の掛け持ちなら問題なし。同姓同名の別人なら"
+                                 "分母が1名少ない(名簿コードで確認を)",
+                         "suggest": suggest_roster(wname, subset)}
 
     # 分母 = 番割に名前のある自社(現場 + 待機/休み枠)。名簿にいても番割に名前が
     # なければ分母に入れない。待機/休み枠は分母に入れるが外貨/管理費には入れない。
