@@ -62,6 +62,7 @@ class App:
         self.aliases = U.load_aliases()
         self.settings = U.load_settings(U.SETTINGS_PATH)
         self.last_review = []
+        self.last_assignments = []   # 直近の読み取り結果(設定変更時の即再計算用)
         self.roster_index = {}   # コード -> Employee (対照表の営業所表示用)
         self.q = queue.Queue()
 
@@ -109,8 +110,10 @@ class App:
         self.btn_run = ttk.Button(run, text="番割から集計する",
                                   command=self._run_live)
         self.btn_run.pack(side="left")
+        ttk.Button(run, text="スナップショットから再計算",
+                   command=self._run_snapshot).pack(side="left", padx=6)
         ttk.Button(run, text="検証: inspectファイルから",
-                   command=self._run_inspect).pack(side="left", padx=6)
+                   command=self._run_inspect).pack(side="left")
         ttk.Button(run, text="出力フォルダを開く",
                    command=self._open_folder).pack(side="right")
 
@@ -188,6 +191,18 @@ class App:
         if p:
             self._start_compute(inspect_path=p, select=None)
 
+    def _run_snapshot(self):
+        """保存済みスナップショット(生データの控え)から番割を読まずに再集計する。
+
+        設定(色・対照表・除外)を直した後、過去分を遡って計算し直す用途。
+        """
+        init = U.SNAPSHOT_DIR if U.SNAPSHOT_DIR.exists() else U.HERE
+        paths = filedialog.askopenfilenames(
+            title="スナップショットCSVを選択(複数可)", initialdir=str(init),
+            filetypes=[("CSV", "*.csv"), ("すべて", "*.*")])
+        if paths:
+            self._start_compute(snapshot_paths=list(paths))
+
     def _choose_boards(self, boards):
         """開いている番割をチェックボックスで一覧表示し、集計対象を選ばせる。"""
         if not boards:
@@ -249,7 +264,7 @@ class App:
         ttk.Button(act, text="キャンセル", command=on_cancel).pack(side="right", padx=6)
         dlg.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    def _start_compute(self, inspect_path=None, select=None):
+    def _start_compute(self, inspect_path=None, select=None, snapshot_paths=None):
         # 名簿は任意(判定は背景色)。roster_paths が空でも集計できる。
         self.btn_run.config(state="disabled")
         self._logmsg("集計を開始します...")
@@ -260,27 +275,66 @@ class App:
 
         def work():
             try:
-                reports = U.analyze(
-                    self.roster_paths, inspect_path=inspect_path,
-                    cust_kw=self.settings["exclude_customer_keywords"],
-                    site_kw=self.settings["exclude_site_keywords"],
-                    aliases=self.aliases, select=select,
-                    log=lambda s: self.q.put(("log", s)))
-                _, review, nchk, nreco = U.write_outputs(reports)
-                self.q.put(("done", (reports, review, nchk, nreco)))
-                if gs.get("enabled") and gs.get("sa_json") and gs.get("spreadsheet"):
-                    try:
-                        import sheets_sync
-                        sheets_sync.sync_history(
-                            reports, gs["sa_json"], gs["spreadsheet"],
-                            gs.get("worksheet", "稼働率履歴"),
-                            log=lambda s: self.q.put(("gslog", s)))
-                    except Exception as e:
-                        self.q.put(("gslog", f"Googleシート更新に失敗: {e}"))
+                if inspect_path:
+                    assignments = U.assignments_from_inspect(inspect_path)
+                elif snapshot_paths:
+                    assignments = U.load_snapshots(snapshot_paths)
+                    self.q.put(("log", f"スナップショット {len(snapshot_paths)} 件から"
+                                f"再計算します(番割は読みません)"))
+                else:
+                    assignments = U.read_assignments(
+                        select=select, log=lambda s: self.q.put(("log", s)))
+                self.last_assignments = assignments
+                self._compute_and_report(assignments, gs)
             except Exception as e:
                 self.q.put(("error", str(e)))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _compute_and_report(self, assignments, gs):
+        """割当リスト→集計→ファイル出力→画面更新(ワーカースレッドで呼ぶ)。"""
+        reports = U.analyze_assignments(
+            assignments, self.roster_paths,
+            cust_kw=self.settings["exclude_customer_keywords"],
+            site_kw=self.settings["exclude_site_keywords"],
+            aliases=self.aliases)
+        _, review, nchk, nreco = U.write_outputs(reports)
+        self.q.put(("done", (reports, review, nchk, nreco)))
+        if gs.get("enabled") and gs.get("sa_json") and gs.get("spreadsheet"):
+            try:
+                import sheets_sync
+                sheets_sync.sync_history(
+                    reports, gs["sa_json"], gs["spreadsheet"],
+                    gs.get("worksheet", "稼働率履歴"),
+                    log=lambda s: self.q.put(("gslog", s)))
+            except Exception as e:
+                self.q.put(("gslog", f"Googleシート更新に失敗: {e}"))
+
+    def _recompute_from_memory(self, reason=""):
+        """直近の読み取り結果から、番割を読み直さずに即座に再集計する。
+
+        対照表・色・除外設定の保存直後に呼ぶ。読み取り前(起動直後)は何もしない。
+        """
+        if not self.last_assignments:
+            return False
+        self.aliases = U.load_aliases()
+        self.settings = U.load_settings(U.SETTINGS_PATH)
+        gs = self.cfg.get("gsheet", {})
+        assignments = self.last_assignments
+        self._logmsg(f"{reason} → 前回の読み取り結果から即再計算します"
+                     "(番割は読み直しません)")
+        if not any(a.get("bg") for a in assignments) and WC.load_color_map():
+            self._logmsg("※ 前回の読み取りは採色なしでした。色判定を反映するには"
+                         "『番割から集計する』で読み直してください。")
+
+        def work():
+            try:
+                self._compute_and_report(assignments, gs)
+            except Exception as e:
+                self.q.put(("error", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
 
     def _poll(self):
         try:
@@ -404,8 +458,9 @@ class App:
             "non_field_staff": list(self.lb_staff.get(0, "end")),
         }
         U.save_settings(self.settings)
-        messagebox.showinfo("保存しました",
-                            "除外設定を保存しました。次の集計から反映されます。")
+        if not self._recompute_from_memory("除外設定を保存"):
+            messagebox.showinfo("保存しました",
+                                "除外設定を保存しました。次の集計から反映されます。")
 
     # ----------------------------------------------------------- 色判定タブ
     def _build_color(self):
@@ -554,10 +609,11 @@ class App:
             tol = WC.DEFAULT_TOLERANCE
         WC.save_color_map(colors, tolerance=tol)
         self._color_log(f"保存しました: {len(colors)} 色 → worker_colors.json "
-                        f"(許容差 {tol})。次の集計から色判定が効きます。")
-        messagebox.showinfo("保存しました",
-                            f"{len(colors)} 色を worker_colors.json に保存しました。\n"
-                            "次回の集計から、氏名の背景色で自社/他社を判定します。")
+                        f"(許容差 {tol})。")
+        if not self._recompute_from_memory("色設定を保存"):
+            messagebox.showinfo("保存しました",
+                                f"{len(colors)} 色を worker_colors.json に保存しました。\n"
+                                "次回の集計から、氏名の背景色で自社/他社を判定します。")
 
     # ----------------------------------------------------------- 対照表タブ
     def _build_alias(self):
@@ -694,6 +750,7 @@ class App:
         U.save_aliases(self.aliases)
         self._refresh_alias_list()
         self._logmsg(f"対照表に登録: {name} → {val}")
+        self._recompute_from_memory("対照表に登録")
 
     def _refresh_review(self):
         for i in self.tree_rev.get_children():
@@ -717,6 +774,7 @@ class App:
         self.aliases.pop(key, None)
         U.save_aliases(self.aliases)
         self._refresh_alias_list()
+        self._recompute_from_memory("対照表から削除")
 
     # ----------------------------------------------------------- 履歴タブ
     def _build_history(self):
