@@ -68,7 +68,7 @@ def check_deps(py):
     importできるか先に確認する。揃っていなければ同梱漏れの配布物になるので、
     ビルド前に止めて原因を明確にする。"""
     code = ("import greenlet._greenlet, playwright, pywinauto, comtypes, "
-            "pywintypes, pythoncom, win32api, "
+            "pywintypes, pythoncom, win32api, win32ui, win32clipboard, "
             "PIL, reportlab, tkcalendar, ttkbootstrap")
     res = subprocess.run([py, "-c", code],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
