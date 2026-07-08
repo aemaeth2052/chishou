@@ -30,11 +30,30 @@ pywinauto_datas, pywinauto_binaries, pywinauto_hidden = collect_all("pywinauto")
 comtypes_datas, comtypes_binaries, comtypes_hidden = collect_all("comtypes")
 
 # pywin32: pywinauto の依存。PyInstaller同梱フックを発火させるため明示的に挙げる。
+# win32ui / win32clipboard は pywinauto が実行時に import する (win32ui が抜けると
+# 番割取込で「DLL load failed while importing win32ui」になる)。
 pywin32_hidden = [
     "pywintypes", "pythoncom",
     "win32api", "win32gui", "win32con", "win32process", "win32event",
+    "win32ui", "win32clipboard",
     "win32com", "win32com.client",
 ]
+
+# win32ui.pyd は pywin32 の Pythonwin/ フォルダにある mfc140u.dll に依存する。
+# PyInstaller の依存解析が取りこぼすことがあり、その場合ビルド機では動くのに
+# 配布先で「DLL load failed while importing win32ui: 指定されたモジュールが
+# 見つかりません」で落ちる。ここで明示的に exe と同じ階層へ同梱する。
+def _pywin32_mfc_binaries():
+    import glob
+    import sysconfig
+    dlls = []
+    for key in ("purelib", "platlib"):
+        pythonwin = os.path.join(sysconfig.get_paths()[key], "pythonwin")
+        dlls += glob.glob(os.path.join(pythonwin, "mfc*.dll"))
+    # 重複除去して exe 直下 (win32ui.pyd と同じ場所) に置く
+    return [(p, ".") for p in sorted(set(dlls))]
+
+pywin32_mfc_binaries = _pywin32_mfc_binaries()
 
 hiddenimports = (
     collect_submodules("ttkbootstrap")
@@ -56,6 +75,7 @@ hiddenimports = (
 binaries = (
     greenlet_binaries + playwright_binaries
     + pywinauto_binaries + comtypes_binaries
+    + pywin32_mfc_binaries
 )
 
 datas = (

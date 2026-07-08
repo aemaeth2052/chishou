@@ -1526,7 +1526,10 @@ if __name__ == "__main__":
                 "playwright.sync_api", "comtypes", "PIL.Image"]
         if sys.platform == "win32":
             mods += ["pywinauto", "pywinauto.uia_defines", "pywinauto.application",
-                     "pywintypes", "pythoncom", "win32api"]
+                     "pywintypes", "pythoncom", "win32api",
+                     # win32ui は pywinauto が実行時に使う。同梱漏れがあると
+                     # 番割取込時に DLL load failed になるためここで検証する
+                     "win32ui", "win32clipboard"]
         failed = []
         for m in mods:
             try:
