@@ -1,0 +1,47 @@
+# ETC明細ダウンローダーを Windows 上で確認し、配布用の exe（フォルダごと）を作る。
+# できた exe は、このワークフローの実行結果ページの「Artifacts」からダウンロードできる。
+name: ETC明細ダウンローダー exe
+
+on:
+  push:
+    paths:
+      - "tools/etc-meisai-downloader/**"
+      - ".github/workflows/etc-exe.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: tools/etc-meisai-downloader
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 必要なパッケージを入れる
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: ブラウザ（Chromium）を入れる（アプリと同じ置き場所）
+        run: python -c "import sys, browser_setup; sys.exit(0 if browser_setup.install_chromium() else 1)"
+
+      - name: 画面つきアプリの起動確認（ダウンロード・設定タブ、設定の各ページを作って閉じる）
+        run: python -c "import app; a = app.App(); assert a.theme.modern, 'sv-ttk'; a.update(); [(a.page_var.set(p), a._show_page(), a.update()) for p in a.pages]; print('gui ok', a.theme.ui); a.destroy()"
+
+      - name: ダウンロードの流れの確認（偽サイトで、全頁選択の省略・画像を読まない・ログイン失敗で止まる）
+        run: python tests\check_download.py
+
+      - name: exe を作る（起動チェックまで）
+        run: python build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ETC明細ダウンローダー
+          path: tools/etc-meisai-downloader/dist/
