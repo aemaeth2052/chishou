@@ -9,6 +9,8 @@
   カードは全て (name=hyojiCard) チェックON
 - 「検索」ボタンの JavaScript 関数 submitKensaku() を呼んで明細画面へ
 - 明細画面 (funccode=1032000000) で全頁選択(ALLON) → 利用明細PDFをPOSTで取得
+  (明細が1ページに収まるときは全頁選択を省き、その画面のチェック欄を全部チェックして取得)
+- ログインの後は画像・フォントを読み込まない (明細の取得には要らない)
 
 サイトの画面構成は予告なく変わる可能性がある。動かなくなったら
 logs/error_* のスクリーンショットとHTMLを確認して修正する。
@@ -17,7 +19,9 @@ logs/error_* のスクリーンショットとHTMLを確認して修正する。
 import base64
 import datetime
 import re
+import time
 import unicodedata
+from collections import defaultdict
 from pathlib import Path
 
 # paths を最初にimportして PLAYWRIGHT_BROWSERS_PATH を設定してから playwright を読み込む
@@ -54,6 +58,11 @@ LOGIN_SELECTORS = {
 
 class EtcMeisaiError(Exception):
     """利用者向けメッセージ付きのエラー"""
+
+
+class LoginFailedError(EtcMeisaiError):
+    """ID/パスワード誤りなどでログインできなかったとき。
+    原因が利用者側で明確なため、画面ダンプ(error_*)は行わない (ノイズ防止)。"""
 
 
 def _find(page, candidates, timeout=10000):
@@ -100,6 +109,26 @@ def _dump(page, log, prefix="error"):
 
 # ---------------------------------------------------------------- ログイン
 
+# 注: この ETC 利用照会サービスは、ログイン失敗時にエラーメッセージを出さず
+# 「ただのログイン画面」を返す。そのため画面文言では成否を判定できず、
+# 認証必須ページにアクセスしてログイン画面が返るか (=_looks_like_login) で判定する。
+
+
+def _looks_like_login(page) -> bool:
+    """今表示している画面がログイン画面か (=未ログイン/セッション切れ) を判定する。
+    パスワード欄やログインID欄が残っていればログイン画面とみなす。
+    """
+    try:
+        if page.locator('input[type="password"]').count() > 0:
+            return True
+        for sel in LOGIN_SELECTORS["id"]:
+            if page.locator(sel).count() > 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _login(page, login_id, password, log):
     log("ログインページを開いています...")
     try:
@@ -116,12 +145,47 @@ def _login(page, login_id, password, log):
     _find(page, LOGIN_SELECTORS["pw"]).fill(password)
     _find(page, LOGIN_SELECTORS["btn"]).click()
     page.wait_for_load_state("domcontentloaded")
+    # ログインPOST(セッション確立)が落ち着くのを待つ (best-effort)
+    try:
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
 
-    body = page.inner_text("body")
-    for ng in ("パスワードが正しくありません", "ログインできません", "認証に失敗"):
-        if ng in body:
-            raise EtcMeisaiError("ログインに失敗しました。IDとパスワードを確認してください。")
+    # ログイン成功の確定判定。
+    # このサイトはログイン失敗時、エラーメッセージを出さずにログイン画面を返すため、
+    # 直後の画面の文言では成否を判定できない。そこで「認証が必須の検索条件画面」へ
+    # 実際に遷移できるかで確定する (未ログインだとログイン画面が返ってくる)。
+    # ここで確実に止めないと、失敗に気づかないまま全車両のダウンロードを試み、
+    # 1台ずつタイムアウトして時間を浪費してしまう (本ツールが直したい問題)。
+    try:
+        page.goto(SEARCH_FORM_URL, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+    if _looks_like_login(page):
+        raise LoginFailedError(
+            "ログインに失敗しました。ユーザーIDとパスワードを確認してください。"
+            "（正しいか不安な場合はETC利用照会サービスに直接ログインして確認してください。"
+            "なお連続して失敗するとアカウントがロックされることがあります）"
+        )
     log("ログインしました")
+
+
+# 画像・フォントは明細の取得に要らないので、ログインの後は読み込まない（通信と表示の手間を減らす）。
+# ブラウザのキャッシュはそのまま使える方法（Chromium の通信の設定）で止める。
+# 読み込まない画像は「壊れた画像」の小さな印になるだけで、ボタンやリンクは押せる。
+_SKIP_FILES = [f"*.{ext}{tail}" for ext in ("gif", "png", "jpg", "jpeg", "bmp", "ico", "svg", "webp",
+                                            "woff", "woff2", "ttf", "otf", "eot")
+               for tail in ("", "?*")]
+
+
+def _skip_heavy_files(page, log):
+    try:
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Network.enable")
+        cdp.send("Network.setBlockedURLs", {"urls": _SKIP_FILES})
+    except Exception as e:  # 止められなくても明細は取れるので、そのまま続ける
+        log(f"（画像を読み込まない設定にできませんでした。そのまま続けます: {e}）")
 
 
 # ------------------------------------------------------- 検索条件の指定画面
@@ -241,12 +305,39 @@ def _total_fare(page):
         return None
 
 
-def _download_pdf(page, dest: Path, log):
-    """結果画面で全頁選択し、利用明細PDFをPOSTで取得して保存する"""
-    if page.locator('input[name="hakkoMeisai"]').count() == 0:
-        return False
+def _shown_total(page):
+    """結果画面に出ている明細の件数（「全12件」「12件中」など）。見つからなければ None"""
+    body = unicodedata.normalize("NFKC", page.inner_text("body"))  # 全角の数字も読む
+    for pattern in (r"全\s*([0-9,]+)\s*件", r"([0-9,]+)\s*件中"):
+        m = re.search(pattern, body)
+        if m:
+            return int(m.group(1).replace(",", ""))
+    return None
 
-    # 全頁選択 (全ページ分の明細をPDF対象にする)
+
+_ROW_BOXES = 'input[type="checkbox"][name="hakkoMeisai"]'
+
+
+def _one_page(page):
+    """明細が全部この1ページに出ているか。
+    画面に出ている件数と、この画面の明細のチェック欄の数が一致するときだけ True。
+    件数の表示が見つからない・合わないときは False（これまでどおり全頁選択する）。"""
+    rows = page.locator(_ROW_BOXES).count()
+    return rows > 0 and _shown_total(page) == rows
+
+
+def _check_rows(page):
+    """この画面の明細のチェック欄を全部チェックする（人がクリックするのと同じ動きで）"""
+    page.evaluate(
+        """(sel) => {
+            for (const el of document.querySelectorAll(sel)) if (!el.checked) el.click();
+        }""",
+        _ROW_BOXES,
+    )
+
+
+def _select_all_pages(page):
+    """「全頁選択」を押す（全ページ分の明細をPDFの対象にする。画面の読み込みが1回かかる）"""
     link = page.locator('a[onclick*="ALLON"]').first
     if not link.count():
         link = page.locator('a:has-text("全頁選択")').first
@@ -254,6 +345,9 @@ def _download_pdf(page, dest: Path, log):
         link.click()
         page.wait_for_load_state("domcontentloaded")
 
+
+def _fetch_pdf(page):
+    """「利用明細ＰＤＦ出力」と同じ内容をPOSTして、返ってきた中身（bytes）と応答の情報を返す"""
     # 「利用明細ＰＤＦ出力」のPOST先URLを onclick から取り出す (nextfunc=1032400000)
     action = page.evaluate(
         r"""() => {
@@ -269,11 +363,66 @@ def _download_pdf(page, dest: Path, log):
     )
     if not action:
         raise EtcMeisaiError("「利用明細ＰＤＦ出力」ボタンが見つかりませんでした。")
-
     result = page.evaluate(_FETCH_PDF_JS, action)
     if result.get("error"):
         raise EtcMeisaiError(f"PDF取得に失敗しました: {result['error']}")
-    data = base64.b64decode(result["b64"])
+    return base64.b64decode(result["b64"]), result
+
+
+# 結果画面のつくり（項目名と数・リンクの関数名・件数の表示）。明細の中身は含めない。
+# 全頁選択を省けなかったとき、原因を調べるためにログへ出す。
+_OUTLINE_JS = r"""() => {
+    const f = document.forms['frm'];
+    const fields = {};
+    for (const el of (f ? Array.from(f.elements) : [])) {
+        if (!el.name) continue;
+        const k = el.name + '(' + (el.type || el.tagName).toLowerCase() + ')';
+        const v = fields[k] || (fields[k] = [0, 0]);
+        v[0]++;
+        if (el.checked) v[1]++;
+    }
+    const links = new Set();
+    for (const el of document.querySelectorAll('[onclick]')) {
+        const m = (el.getAttribute('onclick') || '').match(/([A-Za-z_$][\w$]*)\s*\(\s*'?([A-Z]{3,})?/);
+        const label = (el.value || el.textContent || el.alt || '').trim().replace(/\d{4,}/g, '#').slice(0, 8);
+        links.add(label + (m ? ':' + m[1] + (m[2] ? '/' + m[2] : '') : ''));
+    }
+    const counts = ((document.body.innerText || '').match(/[^\n]{0,6}[0-9,]+\s*件[^\n]{0,6}/g) || []).slice(0, 4);
+    return '項目 ' + Object.entries(fields).map(([k, v]) => k + '×' + v[0] + (v[1] ? '(チェック' + v[1] + ')' : '')).join(', ')
+        + ' ／ リンク ' + Array.from(links).slice(0, 15).join(', ')
+        + ' ／ 件数の表示 ' + (counts.join(' | ') || 'なし');
+}"""
+
+
+def _download_pdf(page, dest: Path, log, stats=None, timed=None):
+    """結果画面で明細を全部選び、利用明細PDFをPOSTで取得して保存する。
+
+    明細が1ページに収まっているときは「全頁選択」（画面の読み込み1回分）を省き、
+    この画面のチェック欄を全部チェックしてから取得する。PDFが返らなければ、全頁選択して取り直す。
+    stats: 全頁選択を省いた台数などを数える dict。timed: 所要時間を測る関数 timed(名前, 関数, 引数...)
+    """
+    stats = stats if stats is not None else {}
+    timed = timed or (lambda _name, func, *args: func(*args))
+    if page.locator('input[name="hakkoMeisai"]').count() == 0:
+        return False
+    if "outline" not in stats:
+        try:
+            stats["outline"] = page.evaluate(_OUTLINE_JS)
+        except Exception as e:
+            stats["outline"] = f"（取得できませんでした: {e}）"
+
+    one_page = _one_page(page)
+    if one_page:
+        _check_rows(page)
+    else:
+        timed("全頁選択", _select_all_pages, page)
+    data, result = _fetch_pdf(page)
+    if one_page and not data.startswith(b"%PDF"):
+        # 全頁選択しないと受け付けない作りだった。これまでどおり全頁選択して取り直す
+        stats["fallback"] = stats.get("fallback", 0) + 1
+        one_page = False
+        timed("全頁選択", _select_all_pages, page)
+        data, result = _fetch_pdf(page)
     if not data.startswith(b"%PDF"):
         bad = LOG_DIR / "last_pdf_response.bin"
         LOG_DIR.mkdir(exist_ok=True)
@@ -283,6 +432,8 @@ def _download_pdf(page, dest: Path, log):
             f"content-type={result['ct']})。logs/last_pdf_response.bin を確認してください。"
         )
     dest.write_bytes(data)
+    key = "one_page" if one_page else "all_pages"
+    stats[key] = stats.get(key, 0) + 1
     return True
 
 
@@ -349,13 +500,23 @@ def run(login_id, password, date_from, date_to, save_dir,
         context = browser.new_context(locale="ja-JP")
         page = context.new_page()
         page.set_default_timeout(30000)
+        # どこに時間がかかったか（秒）。最後に1台あたりの内訳をログに出す（高速化の手がかり）
+        spent = defaultdict(float)
+        stats = {}  # 全頁選択を省いた台数など（_download_pdf が数える）
+
+        def timed(name, func, *args):
+            t = time.perf_counter()
+            try:
+                return func(*args)
+            finally:
+                spent[name] += time.perf_counter() - t
 
         def process(v):
             """1台分の処理。dict(status/detail/fare) を返す"""
             number = str(v.get("number") or "").strip()
-            _goto_search_form(page)
-            _set_search_conditions(page, number, date_from, date_to)
-            _submit_search(page)
+            timed("検索画面", _goto_search_form, page)
+            timed("条件の入力", _set_search_conditions, page, number, date_from, date_to)
+            timed("検索", _submit_search, page)
             fare = _total_fare(page)
 
             # ファイル名: 日付_車両ナンバー[_顧客_現場].pdf
@@ -379,7 +540,7 @@ def run(login_id, password, date_from, date_to, save_dir,
                             "detail": f"同名ファイルあり: {dest.name}", "fare": fare}
                 if dup_mode == "rename":
                     dest = _unique_path(dest)
-            if _download_pdf(page, dest, log):
+            if timed("PDFの取得", _download_pdf, page, dest, log, stats, timed):
                 # 顧客・現場・運転手をPDF下部に書き込み (設定で項目選択)
                 if info and stamp_opts and any(
                         stamp_opts.get(k) for k in ("customer", "site", "driver")):
@@ -395,18 +556,24 @@ def run(login_id, password, date_from, date_to, save_dir,
             return {"status": "no_data", "detail": "", "fare": fare}
 
         results = {}  # index -> {"status","detail","fare"}
+        started = time.perf_counter()
         try:
-            _login(page, login_id, password, log)
+            timed("ログイン", _login, page, login_id, password, log)
+            _skip_heavy_files(page, log)
 
             def label_of(v):
                 name = (v.get("name") or "").strip()
                 number = str(v.get("number") or "").strip()
                 return f"{name}({number})" if name and number else (name or f"車両{number}" or "全車両")
 
-            # 1巡目: 失敗しても次の車両へ進む
+            # 1巡目: 失敗しても次の車両へ進む。
+            # ただしログイン画面に飛ばされている (セッション切れ/未ログイン) を検知したら、
+            # 残り全車両を試すのは時間の無駄なので、その場で打ち切る。
+            session_lost = False
             for i, v in enumerate(targets):
                 notify(i + 1, len(targets))
                 log(f"[{i + 1}/{len(targets)}] {label_of(v)}: 検索中 ({date_from} 〜 {date_to})")
+                t_vehicle = time.perf_counter()
                 try:
                     r = process(v)
                     results[i] = r
@@ -415,14 +582,22 @@ def run(login_id, password, date_from, date_to, save_dir,
                         "no_data": "  → 期間内の利用データなし",
                         "skipped": f"  → {r['detail']} のためスキップ",
                     }
-                    log(msgs[r["status"]])
+                    log(f"{msgs[r['status']]}（{time.perf_counter() - t_vehicle:.1f}秒）")
                 except Exception as e:
                     results[i] = {"status": "failed", "detail": str(e), "fare": None}
                     log(f"  → 失敗: {e}")
                     _dump(page, log, prefix="error")
+                    if _looks_like_login(page):
+                        session_lost = True
+                        log("  → ログイン画面に戻されています。"
+                            "ID/パスワード相違かセッション切れの可能性が高いため、"
+                            "残りの車両の処理を中止します。")
+                        break
 
             # 2巡目: 失敗した車両だけ1回リトライ
-            retry_idx = [i for i, r in results.items() if r["status"] == "failed"]
+            # (セッション切れで打ち切った場合はリトライしても同じなので行わない)
+            retry_idx = ([] if session_lost
+                         else [i for i, r in results.items() if r["status"] == "failed"])
             if retry_idx:
                 log(f"--- 失敗した {len(retry_idx)} 台をリトライします ---")
                 for i in retry_idx:
@@ -441,8 +616,28 @@ def run(login_id, password, date_from, date_to, save_dir,
                 log("ログアウトしました")
             except Exception:
                 pass
+            total = time.perf_counter() - started
+            n = len(targets)
+            parts = " / ".join(f"{k} {spent[k] / n:.1f}秒" for k in ("検索画面", "条件の入力", "検索", "PDFの取得")
+                               if spent.get(k))
+            log(f"所要時間: {int(total // 60)}分{int(total % 60)}秒（ログイン {spent['ログイン']:.0f}秒・"
+                f"1台あたり {(total - spent['ログイン']) / n:.1f}秒: {parts}）")
+            one, many = stats.get("one_page", 0), stats.get("all_pages", 0)
+            if one or many:
+                note = f"全頁選択: {one + many}台のうち {one}台は1ページだけなので省きました"
+                if many:
+                    note += f"（全頁選択した{many}台は合計 {spent['全頁選択']:.1f}秒）"
+                if stats.get("fallback"):
+                    note += f"。うち{stats['fallback']}台は省くとPDFが返らず、全頁選択して取り直しました"
+                log(note)
+            if (many and not one) or stats.get("fallback"):
+                # 1台も省けなかったときは、結果画面のつくりを出しておく（明細の中身は含まない）
+                log(f"（調査用）結果画面のつくり: {stats.get('outline')}")
+        except LoginFailedError:
+            # ID/パスワード誤り。原因が明確なので画面ダンプ(error_*)は残さない
+            raise
         except Exception:
-            # ログイン失敗などの全体エラー
+            # 想定外の全体エラーは原因調査用に画面を保存する
             _dump(page, log, prefix="error")
             raise
         finally:
