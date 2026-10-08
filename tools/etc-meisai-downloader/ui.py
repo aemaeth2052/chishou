@@ -92,11 +92,12 @@ class Theme:
         style.configure("Ok.TLabel", foreground=OK, font=self.font(10, "bold"))
         style.configure("Ng.TLabel", foreground=NG, font=self.font(10, "bold"))
         style.configure("Required.TLabel", foreground=NG)
-        style.configure("Weekday.TLabel", font=self.font(11, "bold"))
         style.configure("Nav.Toolbutton", anchor="w", padding=(14, 8))
         style.map("Nav.Toolbutton", foreground=[("selected", ACCENT)], font=[("selected", self.font(10, "bold"))])
         style.configure("Treeview", rowheight=self.px(26))
-        style.configure("Icon.Toolbutton", padding=(4, 2))
+        style.configure("Date.TButton", font=self.font(11), padding=(10, 3))  # 日付のボタン（曜日つき）
+        style.configure("Sun.Date.TButton", foreground=SUNDAY)
+        style.configure("Sat.Date.TButton", foreground=SATURDAY)
 
     def px(self, n: int) -> int:
         """100% のときのピクセル数を、今の表示倍率でのピクセル数にする"""

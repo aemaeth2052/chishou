@@ -376,15 +376,16 @@ class App(tk.Tk):
 
     # ============================================================ ダウンロード タブ
     def _build_main_tab(self, root):
-        root.columnconfigure(0, weight=3)
-        root.columnconfigure(1, weight=2)
+        # 左右のカードの幅は 3:2 に固定する（番割の取込の説明が長くなっても、検索する日の並びが動かないように）
+        root.columnconfigure(0, weight=3, uniform="top")
+        root.columnconfigure(1, weight=2, uniform="top")
         root.rowconfigure(1, weight=4)
         root.rowconfigure(3, weight=2)
 
         # --- 検索する日 (最初に決める。日常運用ではここから入力する) ---
-        # ふだんは1日だけを検索する。◀ ▶ で前後の日へ、カレンダーのマークで日付を選ぶ。
-        # 「昨日」ボタンで、いつでも昨日に戻せる（昨日を選んでいるときは青くなる）。
-        # 複数の日をまとめて検索するときだけ、下の「期間で指定する」で開始日〜終了日の入力に切り替える。
+        # ふだんは1日だけを検索する。日付はカレンダーのマークつきのボタン1つ（曜日つき）で、押すとカレンダーが開く。
+        # 左端の「昨日」ボタンで、いつでも昨日に戻せる（昨日を選んでいるときは青くなる）。◀ ▶ で前後の日へ。
+        # 複数の日をまとめて検索するときだけ、下の「期間で指定する」で開始日〜終了日に切り替える。
         period = ui.Card(root)
         period.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         head = ttk.Frame(period)
@@ -394,27 +395,28 @@ class App(tk.Tk):
 
         dates = ttk.Frame(period)
         dates.pack(fill="x")
-        yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        label = f"昨日 {yesterday.month}/{yesterday.day}（{ui.weekday_name(yesterday)}）"
-        self.btn_yesterday = ttk.Button(dates, text=label, command=self.set_yesterday)
-        self.btn_yesterday.pack(side="right")
+        # 「昨日」ボタンは左端（1日でも期間でも、番割を取り込んでも動かない）
+        self.btn_yesterday = ttk.Button(dates, text="昨日", width=6, command=self.set_yesterday)
+        self.btn_yesterday.pack(side="left", padx=(0, 10))
         self.box_day = ttk.Frame(dates)
         self.btn_prev_day = ttk.Button(self.box_day, text="◀", width=3, command=lambda: self._step_day(-1))
         self.btn_prev_day.pack(side="left")
-        self._make_date_input(self.box_day, self.var_from).pack(side="left", padx=4)
+        self.btn_day_date = self._make_date_input(self.box_day, self.var_from)
+        self.btn_day_date.pack(side="left", padx=4)
         self.btn_next_day = ttk.Button(self.box_day, text="▶", width=3, command=lambda: self._step_day(1))
         self.btn_next_day.pack(side="left")
         self.box_range = ttk.Frame(dates)
         self._make_date_input(self.box_range, self.var_from).pack(side="left")
         ttk.Label(self.box_range, text="〜").pack(side="left", padx=6)
         self._make_date_input(self.box_range, self.var_to).pack(side="left")
-        self.period_label = ttk.Label(period, style="Weekday.TLabel")
-        self.period_label.pack(anchor="w", pady=(6, 0))
+        # 照会できない日が入っているときだけ、赤で出す（ふだんは出さない）
+        self.period_label = ttk.Label(period, foreground=NG, font=self.theme.font(10, "bold"))
         self.var_span = tk.StringVar(value="day" if self.var_from.get() == self.var_to.get() else "range")
         self.var_use_range = tk.BooleanVar(value=self.var_span.get() == "range")
-        ttk.Checkbutton(period, text="期間で指定する（複数の日をまとめて検索）", variable=self.var_use_range,
-                        command=lambda: self._set_span("range" if self.var_use_range.get() else "day")
-                        ).pack(anchor="w", pady=(4, 0))
+        self.chk_range = ttk.Checkbutton(period, text="期間で指定する（複数の日をまとめて検索）",
+                                         variable=self.var_use_range,
+                                         command=lambda: self._set_span("range" if self.var_use_range.get() else "day"))
+        self.chk_range.pack(anchor="w", pady=(6, 0))
         self.var_from.trace_add("write", lambda *_: self._follow_day())
         for var in (self.var_from, self.var_to):
             var.trace_add("write", lambda *_: self._show_period())
@@ -537,8 +539,8 @@ class App(tk.Tk):
         self._refresh_report_button()
 
     def _show_period(self):
-        """日付の下に、曜日つきの日付（1日なら「昨日」など、期間なら日数）を出す。読めない・範囲外なら赤。
-        昨日1日を選んでいるときは「昨日」ボタンを青くし、◀ ▶ を押せるかも合わせる。"""
+        """昨日1日を選んでいるときは「昨日」ボタンを青くし、◀ ▶ を押せるかを合わせる。
+        照会できない日（62日より前・まだ来ていない日）が入っているときだけ、日付の下に赤で出す。"""
         today = datetime.date.today()
         yesterday = (today - datetime.timedelta(days=1)).strftime("%Y/%m/%d")
         self.btn_yesterday.configure(style="Accent.TButton" if self.var_from.get() == self.var_to.get() == yesterday
@@ -547,33 +549,27 @@ class App(tk.Tk):
             d_from = self.parse_date(self.var_from.get(), "開始日")
             d_to = self.parse_date(self.var_to.get(), "終了日")
         except ValueError:
-            self.period_label.config(text="日付の形が違います（例 2026/06/01）", foreground=NG)
+            self._period_error("日付の形が違います（例 2026/06/01）")
             return
         earliest = today - datetime.timedelta(days=MAX_DAYS)
         self.btn_prev_day.state(["!disabled"] if d_from > earliest else ["disabled"])
         self.btn_next_day.state(["!disabled"] if d_from < today else ["disabled"])
         if d_from > d_to:
-            self.period_label.config(text="開始日が終了日より後になっています", foreground=NG)
-            return
-        if d_from < earliest:
-            self.period_label.config(text=f"開始日が{MAX_DAYS}日より前です（照会できません）", foreground=NG)
-            return
-        if d_to > today:
-            self.period_label.config(text="まだ来ていない日が入っています", foreground=NG)
-            return
-        if d_from == d_to:
-            ago = (today - d_from).days
-            when = {0: "今日", 1: "昨日", 2: "一昨日"}.get(ago, f"{ago}日前")
-            text = f"{ui.japanese_date(d_from)}　{when}の分"
+            self._period_error("開始日が終了日より後になっています")
+        elif d_from < earliest:
+            self._period_error(f"開始日が{MAX_DAYS}日より前です（照会できません）")
+        elif d_to > today:
+            self._period_error("まだ来ていない日が入っています")
         else:
-            text = f"{self._short_date(d_from)} 〜 {self._short_date(d_to)}　{(d_to - d_from).days + 1}日間"
-        self.period_label.config(text=text, foreground=INK)
+            self._period_error("")
 
-    @staticmethod
-    def _short_date(d):
-        """「10月7日（火）」。今年でなければ年もつける。"""
-        year = "" if d.year == datetime.date.today().year else f"{d.year}年"
-        return f"{year}{d.month}月{d.day}日（{ui.weekday_name(d)}）"
+    def _period_error(self, text):
+        """日付の下の赤い注意。空ならしまう。"""
+        if text:
+            self.period_label.config(text=text)
+            self.period_label.pack(anchor="w", pady=(6, 0), before=self.chk_range)
+        else:
+            self.period_label.pack_forget()
 
     def _set_span(self, span):
         """1日（day）と期間（range）を切り替える。1日にすると、終了日は開始日と同じにする。"""
@@ -1379,16 +1375,25 @@ class App(tk.Tk):
         }
 
     def _make_date_input(self, parent, var):
-        """日付の入力欄。直接打ち込めて、横のカレンダーのマークからも選べる。"""
+        """日付のボタン。カレンダーのマークと曜日つきの日付（例 2026/10/07（水））を出し、押すとカレンダーが開く。
+        日曜は赤、土曜は青の字にする。"""
         if not hasattr(self, "_calendar_icon"):
             self._calendar_icon = ui.calendar_icon(self.theme)  # 画像は参照を持っておかないと消える
-        frame = ttk.Frame(parent)
-        entry = ttk.Entry(frame, textvariable=var, width=11, font=self.theme.font(11), justify="center")
-        entry.pack(side="left")
-        button = ttk.Button(frame, image=self._calendar_icon, style="Icon.Toolbutton", cursor="hand2")
+        button = ttk.Button(parent, image=self._calendar_icon, compound="left", style="Date.TButton", cursor="hand2")
         button.configure(command=lambda: self._open_calendar_popup(button, var))
-        button.pack(side="left", padx=(2, 0))
-        return frame
+
+        def show(*_):
+            try:
+                d = self.parse_date(var.get(), "")
+            except ValueError:
+                button.configure(text=f" {var.get()}", style="Date.TButton")
+                return
+            style = {6: "Sun.Date.TButton", 5: "Sat.Date.TButton"}.get(d.weekday(), "Date.TButton")
+            button.configure(text=f" {d:%Y/%m/%d}（{ui.weekday_name(d)}）", style=style)
+
+        var.trace_add("write", show)
+        show()
+        return button
 
     def _open_calendar_popup(self, anchor, var):
         """anchor ウィジェットの真下にカレンダーを開き、選んだ日付を var に入れる。
