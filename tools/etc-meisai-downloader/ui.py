@@ -85,17 +85,18 @@ class Theme:
             if f.cget("size") < 0:
                 f.configure(size=-self.px(-f.cget("size")))
         style = ttk.Style(root)
-        style.configure("Big.Accent.TButton", font=self.font(13, "bold"), padding=(24, 10))
+        style.configure("Big.Accent.TButton", font=self.font(12, "bold"), padding=(20, 6))
         style.configure("Note.TLabel", foreground=MUTED, font=self.font(9))
-        style.configure("Section.TLabel", font=self.font(12, "bold"))
-        style.configure("Page.TLabel", font=self.font(15, "bold"))
+        style.configure("Section.TLabel", font=self.font(11, "bold"))
+        style.configure("Page.TLabel", font=self.font(14, "bold"))
         style.configure("Ok.TLabel", foreground=OK, font=self.font(10, "bold"))
         style.configure("Ng.TLabel", foreground=NG, font=self.font(10, "bold"))
         style.configure("Required.TLabel", foreground=NG)
         style.configure("Weekday.TLabel", font=self.font(11, "bold"))
         style.configure("Nav.Toolbutton", anchor="w", padding=(14, 8))
         style.map("Nav.Toolbutton", foreground=[("selected", ACCENT)], font=[("selected", self.font(10, "bold"))])
-        style.configure("Treeview", rowheight=self.px(28))
+        style.configure("Treeview", rowheight=self.px(26))
+        style.configure("Icon.Toolbutton", padding=(4, 2))
 
     def px(self, n: int) -> int:
         """100% のときのピクセル数を、今の表示倍率でのピクセル数にする"""
@@ -127,22 +128,44 @@ class Theme:
 class Card(ttk.Frame):
     """白い角丸の区画。見出しをつけられる。中の部品は ttk.Frame（Card を重ねると枠が二重になる）。"""
 
-    def __init__(self, master: tk.Misc, title: str = "", padding: int = 14) -> None:
+    def __init__(self, master: tk.Misc, title: str = "", padding: int = 10) -> None:
         super().__init__(master, style="Card.TFrame", padding=padding)
         if title:
-            ttk.Label(self, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 8))
+            ttk.Label(self, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 4))
 
 
 def header_band(root: tk.Misc, theme: Theme, title: str, subtitle: str) -> tk.Frame:
     """画面上の濃紺の帯（題名・説明・今日の日付）。"""
-    head = tk.Frame(root, bg=HEADER_BG, padx=22, pady=14)
+    head = tk.Frame(root, bg=HEADER_BG, padx=18, pady=8)
     left = tk.Frame(head, bg=HEADER_BG)
     left.pack(side="left")
-    tk.Label(left, text=title, bg=HEADER_BG, fg="white", font=theme.font(19, "bold")).pack(anchor="w")
-    tk.Label(left, text=subtitle, bg=HEADER_BG, fg=HEADER_SUB, font=theme.font(10)).pack(anchor="w")
-    tk.Label(head, text=japanese_date(datetime.date.today()), bg=HEADER_BG, fg="white",
-             font=theme.font(12)).pack(side="right", anchor="e")
+    tk.Label(left, text=title, bg=HEADER_BG, fg="white", font=theme.font(16, "bold")).pack(anchor="w")
+    tk.Label(left, text=subtitle, bg=HEADER_BG, fg=HEADER_SUB, font=theme.font(9)).pack(anchor="w")
+    tk.Label(head, text="今日 " + japanese_date(datetime.date.today()), bg=HEADER_BG, fg="white",
+             font=theme.font(11)).pack(side="right", anchor="e")
     return head
+
+
+def calendar_icon(theme: Theme, color: str = INK, accent: str = ACCENT) -> tk.PhotoImage:
+    """カレンダーのマーク（小さな画像）。表示倍率に合わせた大きさで描く。使う側で参照を持っておくこと。"""
+    n = theme.px(18)
+    t = max(1, round(theme.scale))  # 線の太さ
+    img = tk.PhotoImage(master=theme.root, width=n, height=n)
+    top, left, right, bottom = t * 3, t, n - t, n - t
+    img.put(accent, to=(left, top, right, top + t * 4))  # 上の帯（月の欄）
+    img.put(color, to=(left, top, left + t, bottom))  # 左
+    img.put(color, to=(right - t, top, right, bottom))  # 右
+    img.put(color, to=(left, bottom - t, right, bottom))  # 下
+    for x in (left + (right - left) // 4, right - (right - left) // 4 - t):  # 留め具
+        img.put(color, to=(x - t, top - t * 2, x + t, top + t))
+    cell = max(2, t * 2)
+    inner_top = top + t * 6
+    for row in range(3):  # 日付のます
+        for col in range(3):
+            x = left + t * 2 + col * ((right - left - t * 4 - cell) // 2)
+            y = inner_top + row * ((bottom - t * 2 - inner_top - cell) // 2)
+            img.put(accent if (row, col) == (1, 1) else color, to=(x, y, x + cell, y + cell))
+    return img
 
 
 def fit_window(win: tk.Tk, theme: Theme, width: int, height: int,

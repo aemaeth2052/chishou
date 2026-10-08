@@ -97,7 +97,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(TITLE)
         self.theme = ui.Theme(self)
-        _, height = ui.fit_window(self, self.theme, 1000, 900, minimum=(900, 800))
+        _, height = ui.fit_window(self, self.theme, 960, 780, minimum=(880, 680))
         self.log_queue = queue.Queue()
         self.running = False
         self._hks_importing = False
@@ -161,9 +161,9 @@ class App(tk.Tk):
 
         ui.header_band(self, self.theme, TITLE, SUBTITLE).pack(fill="x")
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=16, pady=(12, 16))
-        self.tab_main = ttk.Frame(self.nb, padding=14)
-        self.tab_settings = ttk.Frame(self.nb, padding=14)
+        self.nb.pack(fill="both", expand=True, padx=12, pady=(8, 10))
+        self.tab_main = ttk.Frame(self.nb, padding=10)
+        self.tab_settings = ttk.Frame(self.nb, padding=10)
         self.nb.add(self.tab_main, text="   ダウンロード   ")
         self.nb.add(self.tab_settings, text="   設定   ")
 
@@ -178,19 +178,19 @@ class App(tk.Tk):
         self._ensure_browser()
 
     def _fit_height(self, height):
-        """画面の縦に入りきらないとき（表示倍率が大きいノートPCなど）は、車両の一覧の行数（7→4行）と
-        進行状況の行数（6→3行）を減らして収める。それでも足りない分は、両方が少しずつ縮む。"""
+        """画面の縦に入りきらないとき（表示倍率が大きいノートPCなど）は、車両の一覧の行数（6→4行）と
+        進行状況の行数（5→3行）を減らして収める。それでも足りない分は、両方が少しずつ縮む。"""
         self.update_idletasks()
         short = self.winfo_reqheight() - height
         if short <= 0:
             return
-        row = self.theme.px(28)
-        rows = min(3, -(-short // row))
-        self.tree.configure(height=7 - rows)
+        row = self.theme.px(26)
+        rows = min(2, -(-short // row))
+        self.tree.configure(height=6 - rows)
         short -= rows * row
         if short > 0:
             line = tkfont.Font(font=self.log_text.cget("font")).metrics("linespace")
-            self.log_text.configure(height=6 - min(3, -(-short // line)))
+            self.log_text.configure(height=5 - min(2, -(-short // line)))
         self.tab_main.rowconfigure(3, weight=4)  # 残りは一覧と進行状況で同じだけ縮める
 
     def _set_app_icon(self):
@@ -381,30 +381,48 @@ class App(tk.Tk):
         root.rowconfigure(1, weight=4)
         root.rowconfigure(3, weight=2)
 
-        # --- 検索期間 (最初に決める。日常運用ではここから入力する) ---
-        period = ui.Card(root, f"検索期間（過去{MAX_DAYS}日以内）")
-        period.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        line = ttk.Frame(period)
-        line.pack(fill="x")
-        self._make_date_input(line, self.var_from).pack(side="left")
-        ttk.Label(line, text="〜").pack(side="left", padx=6)
-        self._make_date_input(line, self.var_to).pack(side="left")
-        self.period_label = ttk.Label(period, style="Weekday.TLabel")
-        self.period_label.pack(anchor="w", pady=(8, 6))
-        shortcuts = ttk.Frame(period)
-        shortcuts.pack(fill="x")
-        # ショートカット: 「昨日：mm/dd(曜)」→「今月」→「先月」
+        # --- 検索する日 (最初に決める。日常運用ではここから入力する) ---
+        # ふだんは1日だけを検索する。◀ ▶ で前後の日へ、カレンダーのマークで日付を選ぶ。
+        # 「昨日」ボタンで、いつでも昨日に戻せる（昨日を選んでいるときは青くなる）。
+        # 複数の日をまとめて検索するときだけ、下の「期間で指定する」で開始日〜終了日の入力に切り替える。
+        period = ui.Card(root)
+        period.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        head = ttk.Frame(period)
+        head.pack(fill="x", pady=(0, 6))
+        ttk.Label(head, text="検索する日", style="Section.TLabel").pack(side="left")
+        ttk.Label(head, text=f"照会できるのは過去{MAX_DAYS}日まで", style="Note.TLabel").pack(side="right")
+
+        dates = ttk.Frame(period)
+        dates.pack(fill="x")
         yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        ttk.Button(shortcuts, text=f"昨日 {yesterday:%m/%d}（{ui.weekday_name(yesterday)}）",
-                   command=self.set_yesterday).pack(side="left")
-        ttk.Button(shortcuts, text="今月", command=self.set_this_month).pack(side="left", padx=6)
-        ttk.Button(shortcuts, text="先月", command=self.set_last_month).pack(side="left")
+        label = f"昨日 {yesterday.month}/{yesterday.day}（{ui.weekday_name(yesterday)}）"
+        self.btn_yesterday = ttk.Button(dates, text=label, command=self.set_yesterday)
+        self.btn_yesterday.pack(side="right")
+        self.box_day = ttk.Frame(dates)
+        self.btn_prev_day = ttk.Button(self.box_day, text="◀", width=3, command=lambda: self._step_day(-1))
+        self.btn_prev_day.pack(side="left")
+        self._make_date_input(self.box_day, self.var_from).pack(side="left", padx=4)
+        self.btn_next_day = ttk.Button(self.box_day, text="▶", width=3, command=lambda: self._step_day(1))
+        self.btn_next_day.pack(side="left")
+        self.box_range = ttk.Frame(dates)
+        self._make_date_input(self.box_range, self.var_from).pack(side="left")
+        ttk.Label(self.box_range, text="〜").pack(side="left", padx=6)
+        self._make_date_input(self.box_range, self.var_to).pack(side="left")
+        self.period_label = ttk.Label(period, style="Weekday.TLabel")
+        self.period_label.pack(anchor="w", pady=(6, 0))
+        self.var_span = tk.StringVar(value="day" if self.var_from.get() == self.var_to.get() else "range")
+        self.var_use_range = tk.BooleanVar(value=self.var_span.get() == "range")
+        ttk.Checkbutton(period, text="期間で指定する（複数の日をまとめて検索）", variable=self.var_use_range,
+                        command=lambda: self._set_span("range" if self.var_use_range.get() else "day")
+                        ).pack(anchor="w", pady=(4, 0))
+        self.var_from.trace_add("write", lambda *_: self._follow_day())
         for var in (self.var_from, self.var_to):
             var.trace_add("write", lambda *_: self._show_period())
+        self._set_span(self.var_span.get())
 
         # --- Hks番割の取込 (PDF名と按分レポートに顧客・現場を反映) ---
         hks = ui.Card(root, "番割の取込")
-        hks.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        hks.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         self.btn_hks = _btn(hks, "番割全体表示から取込", self.on_import_hks)
         self.btn_hks.pack(anchor="w")
         status = ttk.Label(hks, textvariable=self.var_hks_status, style="Note.TLabel", justify="left")
@@ -412,8 +430,8 @@ class App(tk.Tk):
         hks.bind("<Configure>", lambda e: status.config(wraplength=max(e.width - 30, 160)), add="+")
 
         # --- 対象の車両 ---
-        target = ui.Card(root, padding=12)
-        target.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(14, 0))
+        target = ui.Card(root)
+        target.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
         top = ttk.Frame(target)
         top.pack(fill="x", pady=(0, 8))
         ttk.Label(top, text="対象の車両", style="Section.TLabel").pack(side="left")
@@ -438,7 +456,7 @@ class App(tk.Tk):
         cols = ("on", "number", "customer", "site", "driver", "dept")
         headers = {"on": "対象", "number": "車両番号", "customer": "顧客",
                    "site": "現場", "driver": "運転手", "dept": "備考"}
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=7, selectmode="browse")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=6, selectmode="browse")
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda col=c: self._sort_by(col))
         self.tree.column("on", width=self.theme.px(52), anchor="center", stretch=False)
@@ -478,7 +496,7 @@ class App(tk.Tk):
 
         # --- 実行 ---
         action = ttk.Frame(root)
-        action.grid(row=2, column=0, columnspan=2, sticky="we", pady=14)
+        action.grid(row=2, column=0, columnspan=2, sticky="we", pady=8)
         self.btn_run = _btn(action, "検索開始", self.on_run, style="Big.Accent.TButton")
         self.btn_run.pack(side="left")
         self.progress = ttk.Progressbar(action, mode="determinate", length=240)
@@ -487,11 +505,11 @@ class App(tk.Tk):
                         style="Switch.TCheckbutton").pack(side="right")
 
         # --- 進行状況 (色分けしたログ) ---
-        log_card = ui.Card(root, "進行状況", padding=10)
+        log_card = ui.Card(root, "進行状況", padding=8)
         log_card.grid(row=3, column=0, columnspan=2, sticky="nsew")
         frame = ttk.Frame(log_card)
         frame.pack(fill="both", expand=True)
-        self.log_text = tk.Text(frame, height=6, state="disabled", wrap="none", font=(self.theme.mono, 10),
+        self.log_text = tk.Text(frame, height=5, state="disabled", wrap="none", font=(self.theme.mono, 10),
                                 bg=ui.CARD, fg=INK, relief="flat", bd=0, padx=8, pady=6, highlightthickness=0,
                                 spacing1=1, spacing3=1)
         ybar = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
@@ -509,7 +527,7 @@ class App(tk.Tk):
 
         # --- 状態と結果 ---
         bottom = ttk.Frame(root)
-        bottom.grid(row=4, column=0, columnspan=2, sticky="we", pady=(12, 0))
+        bottom.grid(row=4, column=0, columnspan=2, sticky="we", pady=(8, 0))
         self.status_bar = ttk.Label(bottom, text="● 準備しています…", font=self.theme.font(10))
         self.status_bar.pack(side="left", fill="x", expand=True)
         ttk.Button(bottom, text="保存先を開く", command=lambda: open_folder(self.var_dir.get())).pack(side="right")
@@ -519,23 +537,69 @@ class App(tk.Tk):
         self._refresh_report_button()
 
     def _show_period(self):
-        """検索期間の下に、曜日つきの日付と日数を出す（読めない・範囲外なら赤）。"""
+        """日付の下に、曜日つきの日付（1日なら「昨日」など、期間なら日数）を出す。読めない・範囲外なら赤。
+        昨日1日を選んでいるときは「昨日」ボタンを青くし、◀ ▶ を押せるかも合わせる。"""
+        today = datetime.date.today()
+        yesterday = (today - datetime.timedelta(days=1)).strftime("%Y/%m/%d")
+        self.btn_yesterday.configure(style="Accent.TButton" if self.var_from.get() == self.var_to.get() == yesterday
+                                     else "TButton")
         try:
             d_from = self.parse_date(self.var_from.get(), "開始日")
             d_to = self.parse_date(self.var_to.get(), "終了日")
         except ValueError:
             self.period_label.config(text="日付の形が違います（例 2026/06/01）", foreground=NG)
             return
+        earliest = today - datetime.timedelta(days=MAX_DAYS)
+        self.btn_prev_day.state(["!disabled"] if d_from > earliest else ["disabled"])
+        self.btn_next_day.state(["!disabled"] if d_from < today else ["disabled"])
         if d_from > d_to:
             self.period_label.config(text="開始日が終了日より後になっています", foreground=NG)
             return
-        if (datetime.date.today() - d_from).days > MAX_DAYS:
+        if d_from < earliest:
             self.period_label.config(text=f"開始日が{MAX_DAYS}日より前です（照会できません）", foreground=NG)
             return
-        days = (d_to - d_from).days + 1
-        text = ui.japanese_date(d_from) if days == 1 else \
-            f"{ui.japanese_date(d_from)} 〜 {ui.japanese_date(d_to)}（{days}日間）"
+        if d_to > today:
+            self.period_label.config(text="まだ来ていない日が入っています", foreground=NG)
+            return
+        if d_from == d_to:
+            ago = (today - d_from).days
+            when = {0: "今日", 1: "昨日", 2: "一昨日"}.get(ago, f"{ago}日前")
+            text = f"{ui.japanese_date(d_from)}　{when}の分"
+        else:
+            text = f"{self._short_date(d_from)} 〜 {self._short_date(d_to)}　{(d_to - d_from).days + 1}日間"
         self.period_label.config(text=text, foreground=INK)
+
+    @staticmethod
+    def _short_date(d):
+        """「10月7日（火）」。今年でなければ年もつける。"""
+        year = "" if d.year == datetime.date.today().year else f"{d.year}年"
+        return f"{year}{d.month}月{d.day}日（{ui.weekday_name(d)}）"
+
+    def _set_span(self, span):
+        """1日（day）と期間（range）を切り替える。1日にすると、終了日は開始日と同じにする。"""
+        self.var_span.set(span)
+        self.var_use_range.set(span == "range")
+        self.box_day.pack_forget()
+        self.box_range.pack_forget()
+        (self.box_day if span == "day" else self.box_range).pack(side="left")
+        if span == "day":
+            self._follow_day()
+        self._show_period()
+
+    def _follow_day(self):
+        """1日のときは、終了日を開始日と同じにする"""
+        if self.var_span.get() == "day" and self.var_to.get() != self.var_from.get():
+            self.var_to.set(self.var_from.get())
+
+    def _step_day(self, delta):
+        """1日のとき、前の日・次の日へ動かす（照会できる範囲＝今日から過去62日までの中で）"""
+        today = datetime.date.today()
+        try:
+            d = self.parse_date(self.var_from.get(), "") + datetime.timedelta(days=delta)
+        except ValueError:
+            return
+        if today - datetime.timedelta(days=MAX_DAYS) <= d <= today:
+            self.var_from.set(d.strftime("%Y/%m/%d"))
 
     def _latest_report(self):
         try:
@@ -1315,40 +1379,43 @@ class App(tk.Tk):
         }
 
     def _make_date_input(self, parent, var):
-        """日付入力欄。直接入力できる Entry と、カレンダーを開くボタンを並べる。"""
+        """日付の入力欄。直接打ち込めて、横のカレンダーのマークからも選べる。"""
+        if not hasattr(self, "_calendar_icon"):
+            self._calendar_icon = ui.calendar_icon(self.theme)  # 画像は参照を持っておかないと消える
         frame = ttk.Frame(parent)
-        entry = ttk.Entry(frame, textvariable=var, width=11, font=self.theme.font(11))
+        entry = ttk.Entry(frame, textvariable=var, width=11, font=self.theme.font(11), justify="center")
         entry.pack(side="left")
-        button = ttk.Button(frame, text="カレンダー")
+        button = ttk.Button(frame, image=self._calendar_icon, style="Icon.Toolbutton", cursor="hand2")
         button.configure(command=lambda: self._open_calendar_popup(button, var))
-        button.pack(side="left", padx=(4, 0))
+        button.pack(side="left", padx=(2, 0))
         return frame
 
     def _open_calendar_popup(self, anchor, var):
-        """anchor ウィジェットの真下にカレンダーを開き、選んだ日付を var に入れる"""
+        """anchor ウィジェットの真下にカレンダーを開き、選んだ日付を var に入れる。
+        期間のとき、開始日が終了日より後になったら（またはその逆）、もう片方も同じ日にそろえる。"""
         try:
             cur = self.parse_date(var.get(), "")
         except Exception:
             cur = datetime.date.today()
         earliest = datetime.date.today() - datetime.timedelta(days=MAX_DAYS)
-        ui.CalendarPopup(self, anchor, cur, lambda d: var.set(d.strftime("%Y/%m/%d")), self.theme, earliest)
 
-    # 期間ショートカット
-    def set_this_month(self):
-        today = datetime.date.today()
-        self.var_from.set(today.replace(day=1).strftime("%Y/%m/%d"))
-        self.var_to.set(today.strftime("%Y/%m/%d"))
+        def pick(d):
+            value = d.strftime("%Y/%m/%d")
+            var.set(value)
+            try:
+                d_from = self.parse_date(self.var_from.get(), "")
+                d_to = self.parse_date(self.var_to.get(), "")
+            except ValueError:
+                return
+            if d_from > d_to:
+                (self.var_to if var is self.var_from else self.var_from).set(value)
 
-    def set_last_month(self):
-        first_this = datetime.date.today().replace(day=1)
-        last_end = first_this - datetime.timedelta(days=1)
-        self.var_from.set(last_end.replace(day=1).strftime("%Y/%m/%d"))
-        self.var_to.set(last_end.strftime("%Y/%m/%d"))
+        ui.CalendarPopup(self, anchor, cur, pick, self.theme, earliest)
 
     def set_yesterday(self):
-        y = datetime.date.today() - datetime.timedelta(days=1)
-        self.var_from.set(y.strftime("%Y/%m/%d"))
-        self.var_to.set(y.strftime("%Y/%m/%d"))
+        """昨日1日にする（起動したときもこれ）"""
+        self._set_span("day")
+        self.var_from.set((datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y/%m/%d"))
 
     def browse_dir(self):
         d = filedialog.askdirectory(initialdir=self.var_dir.get() or str(Path.home()))
