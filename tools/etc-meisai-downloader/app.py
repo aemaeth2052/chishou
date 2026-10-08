@@ -17,6 +17,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 # paths を最優先でimportして PLAYWRIGHT_BROWSERS_PATH を設定
 # (この前に playwright が読まれると環境変数が効かなくなる)
@@ -92,11 +93,11 @@ def _btn(parent, text, command, style="default", **kw):
 
 class App(tk.Tk):
     def __init__(self):
+        ui.enable_dpi_awareness()  # Tk の窓を作る前に（表示倍率でぼやけないように）
         super().__init__()
         self.title(TITLE)
-        self.geometry("1000x900")
-        self.minsize(900, 800)
         self.theme = ui.Theme(self)
+        _, height = ui.fit_window(self, self.theme, 1000, 900, minimum=(900, 800))
         self.log_queue = queue.Queue()
         self.running = False
         self._hks_importing = False
@@ -171,9 +172,26 @@ class App(tk.Tk):
 
         self._refresh_mode()
         self._refresh_list()
+        self._fit_height(height)
         self.after(100, self.poll_log)
         self._chromium_ready = False
         self._ensure_browser()
+
+    def _fit_height(self, height):
+        """画面の縦に入りきらないとき（表示倍率が大きいノートPCなど）は、車両の一覧の行数（7→4行）と
+        進行状況の行数（6→3行）を減らして収める。それでも足りない分は、両方が少しずつ縮む。"""
+        self.update_idletasks()
+        short = self.winfo_reqheight() - height
+        if short <= 0:
+            return
+        row = self.theme.px(28)
+        rows = min(3, -(-short // row))
+        self.tree.configure(height=7 - rows)
+        short -= rows * row
+        if short > 0:
+            line = tkfont.Font(font=self.log_text.cget("font")).metrics("linespace")
+            self.log_text.configure(height=6 - min(3, -(-short // line)))
+        self.tab_main.rowconfigure(3, weight=4)  # 残りは一覧と進行状況で同じだけ縮める
 
     def _set_app_icon(self):
         """ウインドウ/タスクバーのアイコンを設定する。
@@ -423,12 +441,12 @@ class App(tk.Tk):
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=7, selectmode="browse")
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda col=c: self._sort_by(col))
-        self.tree.column("on", width=52, anchor="center", stretch=False)
-        self.tree.column("number", width=96, anchor="center", stretch=False)
-        self.tree.column("customer", width=170, stretch=True)
-        self.tree.column("site", width=210, stretch=True)
-        self.tree.column("driver", width=100, stretch=False)
-        self.tree.column("dept", width=110, stretch=False)
+        self.tree.column("on", width=self.theme.px(52), anchor="center", stretch=False)
+        self.tree.column("number", width=self.theme.px(96), anchor="center", stretch=False)
+        self.tree.column("customer", width=self.theme.px(170), stretch=True)
+        self.tree.column("site", width=self.theme.px(210), stretch=True)
+        self.tree.column("driver", width=self.theme.px(100), stretch=False)
+        self.tree.column("dept", width=self.theme.px(110), stretch=False)
         self.tree.tag_configure("checked", background=CHECKED_ROW)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -1110,10 +1128,10 @@ class App(tk.Tk):
         tree.heading("office", text="営業所")
         tree.heading("date", text="日付")
         tree.heading("update", text="更新")
-        tree.column("on", width=50, anchor="center", stretch=False)
-        tree.column("office", width=200, anchor="w", stretch=False)
-        tree.column("date", width=110, anchor="center", stretch=False)
-        tree.column("update", width=80, anchor="center", stretch=False)
+        tree.column("on", width=self.theme.px(50), anchor="center", stretch=False)
+        tree.column("office", width=self.theme.px(200), anchor="w", stretch=False)
+        tree.column("date", width=self.theme.px(110), anchor="center", stretch=False)
+        tree.column("update", width=self.theme.px(80), anchor="center", stretch=False)
         # チェック済みの行をうっすら水色でハイライトする
         tree.tag_configure("checked", background="#e6f3fb")
         tree.pack(fill="both", expand=True)

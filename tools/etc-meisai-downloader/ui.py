@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import calendar
 import datetime
+import sys
 import tkinter as tk
 from tkinter import ttk
 from tkinter import font as tkfont
@@ -29,6 +30,22 @@ MONO_FONTS = ("BIZ UDGothic", "BIZ UDゴシック", "MS Gothic", "ＭＳ ゴシ�
 WEEKDAYS = ("日", "月", "火", "水", "木", "金", "土")  # 日曜始まり
 
 
+def enable_dpi_awareness() -> None:
+    """Windows の表示倍率（125%・150% など）で、画面が引き伸ばされてぼやけないようにする。
+    Tk の窓を作る前に呼ぶ。番割の取込で読み込む pywinauto と同じ設定（モニターごと）にそろえる
+    （そろえないと、取込を押した時点で表示の大きさが変わってしまう）。"""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 def weekday_name(d: datetime.date) -> str:
     return "月火水木金土日"[d.weekday()]
 
@@ -42,6 +59,8 @@ class Theme:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        # 表示倍率（100% なら 1.0、150% なら 1.5）。ピクセルで決めている大きさに掛ける
+        self.scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
         families = set(tkfont.families(root))
         self.ui = next((f for f in UI_FONTS if f in families), None)
         self.mono = next((f for f in MONO_FONTS if f in families), "TkFixedFont")
@@ -56,6 +75,15 @@ class Theme:
                     tkfont.nametofont(name, root).configure(family=self.ui)
                 except tk.TclError:
                     pass
+        # sv-ttk の文字（ボタン・タブ・一覧の見出しなど）はピクセルで決まっているので、表示倍率に合わせて大きくする
+        for name in ("SunValleyCaptionFont", "SunValleyBodyFont", "SunValleyBodyStrongFont", "SunValleyBodyLargeFont",
+                     "SunValleySubtitleFont", "SunValleyTitleFont", "SunValleyTitleLargeFont", "SunValleyDisplayFont"):
+            try:
+                f = tkfont.nametofont(name, root)
+            except tk.TclError:
+                continue
+            if f.cget("size") < 0:
+                f.configure(size=-self.px(-f.cget("size")))
         style = ttk.Style(root)
         style.configure("Big.Accent.TButton", font=self.font(13, "bold"), padding=(24, 10))
         style.configure("Note.TLabel", foreground=MUTED, font=self.font(9))
@@ -67,7 +95,11 @@ class Theme:
         style.configure("Weekday.TLabel", font=self.font(11, "bold"))
         style.configure("Nav.Toolbutton", anchor="w", padding=(14, 8))
         style.map("Nav.Toolbutton", foreground=[("selected", ACCENT)], font=[("selected", self.font(10, "bold"))])
-        style.configure("Treeview", rowheight=28)
+        style.configure("Treeview", rowheight=self.px(28))
+
+    def px(self, n: int) -> int:
+        """100% のときのピクセル数を、今の表示倍率でのピクセル数にする"""
+        return int(round(n * self.scale))
 
     def font(self, size: int, weight: str = "normal") -> tuple:
         return (self.ui or "TkDefaultFont", size, weight)
@@ -111,6 +143,20 @@ def header_band(root: tk.Misc, theme: Theme, title: str, subtitle: str) -> tk.Fr
     tk.Label(head, text=japanese_date(datetime.date.today()), bg=HEADER_BG, fg="white",
              font=theme.font(12)).pack(side="right", anchor="e")
     return head
+
+
+def fit_window(win: tk.Tk, theme: Theme, width: int, height: int,
+               minimum: tuple[int, int] | None = None) -> tuple[int, int]:
+    """表示倍率に合わせた大きさ（100% のときの width×height）で、画面の真ん中に出す。
+    画面に入りきらないときは、画面の大きさ（タスクバーと題名の帯の分を空ける）まで小さくする。
+    実際の大きさ（幅, 高さ）を返す。"""
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    max_w, max_h = sw - theme.px(16), sh - theme.px(80)
+    w, h = min(theme.px(width), max_w), min(theme.px(height), max_h)
+    if minimum:
+        win.minsize(min(theme.px(minimum[0]), w), min(theme.px(minimum[1]), h))
+    win.geometry(f"{w}x{h}+{max((sw - w) // 2, 0)}+{max((max_h - h) // 2, 0)}")
+    return w, h
 
 
 def center_on(win: tk.Toplevel, parent: tk.Misc, top: int | None = None) -> None:
