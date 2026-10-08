@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """ETC利用明細ダウンローダー GUI
 
+画面のデザインは番割集計と同じ（Windows 11 風のテーマ・濃紺の帯・白いカード。ui.py）。
 タブ構成:
-  メイン: 検索対象 / 期間 / 実行 / ログ
-  設定  : ログイン情報 / PDF保存先 / 車両の新規登録
+  ダウンロード: 検索期間 / 番割の取込 / 対象の車両 / 検索開始 / 進行状況
+  設定        : 左の一覧で ログイン / 保存先 / PDFへの書き込み / 車両の登録 を切り替える
 """
 
 import datetime
@@ -15,29 +16,20 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, ttk
 
 # paths を最優先でimportして PLAYWRIGHT_BROWSERS_PATH を設定
 # (この前に playwright が読まれると環境変数が効かなくなる)
 from paths import config_path, migrate_old_data, user_data_dir  # noqa: I001
 
-try:
-    import ttkbootstrap as ttkb
-    _BaseWindow = ttkb.Window
-    HAS_TTKB = True
-except ImportError:
-    _BaseWindow = tk.Tk
-    HAS_TTKB = False
-
-try:
-    from tkcalendar import Calendar as _TkCalendar
-    from tkcalendar import DateEntry as _TkCalDateEntry  # noqa: F401
-    HAS_DATEENTRY = True
-except ImportError:
-    HAS_DATEENTRY = False
-
 import browser_setup
 import downloader
+import ui
+from ui import ACCENT, CHECKED_ROW, INK, MUTED, NG, OK, WARN
+
+TITLE = "ETC利用明細ダウンローダー"
+SUBTITLE = "ETC利用照会サービスから、車両ごとの利用明細PDFをまとめてダウンロードします"
+MAX_DAYS = 62  # ETC利用照会サービスで照会できる日数
 
 BASE_DIR = Path(__file__).resolve().parent
 migrate_old_data(BASE_DIR)
@@ -90,41 +82,26 @@ def open_folder(path):
 
 
 def _btn(parent, text, command, style="default", **kw):
-    styles = {
-        "primary": "primary",
-        "success": "success",
-        "warning": "warning",
-        "info": "info",
-        "danger": "danger-outline",
-        "secondary": "secondary-outline",
-        "default": None,
-    }
-    if HAS_TTKB and styles.get(style):
-        return ttkb.Button(parent, text=text, command=command, bootstyle=styles[style], **kw)
+    """ボタン。primary / success は目立つ青（Accent）、「〜.TButton」はそのスタイル、それ以外はふつうのボタン。"""
+    if style in ("primary", "success"):
+        kw.setdefault("style", "Accent.TButton")
+    elif style.endswith(".TButton"):
+        kw.setdefault("style", style)
     return ttk.Button(parent, text=text, command=command, **kw)
 
 
-def _set_btn_style(btn, style):
-    """ttkbootstrap環境ならbootstyleを動的に切替 (フォールバック環境では無視)"""
-    if HAS_TTKB:
-        try:
-            btn.configure(bootstyle=style)
-        except Exception:
-            pass
-
-
-class App(_BaseWindow):
+class App(tk.Tk):
     def __init__(self):
-        if HAS_TTKB:
-            super().__init__(themename="yeti")
-        else:
-            super().__init__()
-        self.title("ETC利用明細ダウンローダー")
-        self.geometry("800x760")
-        self.minsize(720, 640)
+        super().__init__()
+        self.title(TITLE)
+        self.geometry("1000x900")
+        self.minsize(900, 800)
+        self.theme = ui.Theme(self)
         self.log_queue = queue.Queue()
         self.running = False
         self._hks_importing = False
+        self._started_at = 0.0
+        self._progress_text = ""
         self._set_app_icon()
 
         cfg = load_config()
@@ -181,13 +158,13 @@ class App(_BaseWindow):
         self.var_hks_status = tk.StringVar()
         self._update_hks_status()
 
-        # ノートブック
+        ui.header_band(self, self.theme, TITLE, SUBTITLE).pack(fill="x")
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-        self.tab_main = ttk.Frame(self.nb, padding=8)
-        self.tab_settings = ttk.Frame(self.nb, padding=8)
-        self.nb.add(self.tab_main, text="  メイン  ")
-        self.nb.add(self.tab_settings, text="  設定  ")
+        self.nb.pack(fill="both", expand=True, padx=16, pady=(12, 16))
+        self.tab_main = ttk.Frame(self.nb, padding=14)
+        self.tab_settings = ttk.Frame(self.nb, padding=14)
+        self.nb.add(self.tab_main, text="   ダウンロード   ")
+        self.nb.add(self.tab_settings, text="   設定   ")
 
         self._build_main_tab(self.tab_main)
         self._build_settings_tab(self.tab_settings)
@@ -259,7 +236,7 @@ class App(_BaseWindow):
     def _apply_win_icon_native(self, ico_path):
         """Win32 の WM_SETICON / クラスアイコンで直接アイコンを設定する。
 
-        Tk の iconphoto/iconbitmap は、ttkbootstrap 環境では winfo_id() が
+        Tk の iconphoto/iconbitmap は、環境によっては winfo_id() が
         タイトルバーを持つ実窓と別の内部窓を指すため効かないことがある。
         そこで本GUIスレッドの全ウインドウを列挙し、タイトルを持つ実窓へ直接適用する。
         実窓は生成が少し遅れ、かつ Tk が直後に自前アイコンで上書きすることがあるため、
@@ -379,226 +356,306 @@ class App(_BaseWindow):
 
         browser_setup.ensure_chromium_async(log=self.log, on_ready=on_ready, on_fail=on_fail)
 
-    # ============================================================ メインタブ
+    # ============================================================ ダウンロード タブ
     def _build_main_tab(self, root):
-        # --- 期間 (最初に決める。日常運用ではここから入力する) ---
-        box2 = ttk.LabelFrame(root, text="検索期間 (過去62日以内)", padding=6)
-        box2.pack(fill="x", pady=(0, 4))
-        ttk.Label(box2, text="開始").grid(row=0, column=0, sticky="w")
-        self._make_date_input(box2, self.var_from).grid(row=0, column=1, padx=4)
-        ttk.Label(box2, text="〜 終了").grid(row=0, column=2, sticky="w")
-        self._make_date_input(box2, self.var_to).grid(row=0, column=3, padx=4)
-        # ショートカット: 「昨日：mm/dd(曜)」→「今月」の順
-        yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        wd = "月火水木金土日"[yesterday.weekday()]
-        ttk.Button(box2, text=f"昨日：{yesterday:%m/%d}({wd})",
-                   command=self.set_yesterday).grid(row=0, column=4, padx=2)
-        ttk.Button(box2, text="今月", command=self.set_this_month, width=5).grid(row=0, column=5, padx=2)
+        root.columnconfigure(0, weight=3)
+        root.columnconfigure(1, weight=2)
+        root.rowconfigure(1, weight=4)
+        root.rowconfigure(3, weight=2)
 
-        # --- 検索対象 (横並び、幅を抑える) ---
-        mode_row = ttk.Frame(root)
-        mode_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(mode_row, text="検索対象:").pack(side="left")
-        ttk.Radiobutton(
-            mode_row, text="登録済みリストから複数選択", value="list",
-            variable=self.var_mode, command=self._refresh_mode,
-        ).pack(side="left", padx=8)
-        ttk.Radiobutton(
-            mode_row, text="単一車両を指定", value="single",
-            variable=self.var_mode, command=self._refresh_mode,
-        ).pack(side="left", padx=4)
+        # --- 検索期間 (最初に決める。日常運用ではここから入力する) ---
+        period = ui.Card(root, f"検索期間（過去{MAX_DAYS}日以内）")
+        period.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        line = ttk.Frame(period)
+        line.pack(fill="x")
+        self._make_date_input(line, self.var_from).pack(side="left")
+        ttk.Label(line, text="〜").pack(side="left", padx=6)
+        self._make_date_input(line, self.var_to).pack(side="left")
+        self.period_label = ttk.Label(period, style="Weekday.TLabel")
+        self.period_label.pack(anchor="w", pady=(8, 6))
+        shortcuts = ttk.Frame(period)
+        shortcuts.pack(fill="x")
+        # ショートカット: 「昨日：mm/dd(曜)」→「今月」→「先月」
+        yesterday = datetime.date.today() - datetime.timedelta(days=1)
+        ttk.Button(shortcuts, text=f"昨日 {yesterday:%m/%d}（{ui.weekday_name(yesterday)}）",
+                   command=self.set_yesterday).pack(side="left")
+        ttk.Button(shortcuts, text="今月", command=self.set_this_month).pack(side="left", padx=6)
+        ttk.Button(shortcuts, text="先月", command=self.set_last_month).pack(side="left")
+        for var in (self.var_from, self.var_to):
+            var.trace_add("write", lambda *_: self._show_period())
+
+        # --- Hks番割の取込 (PDF名と按分レポートに顧客・現場を反映) ---
+        hks = ui.Card(root, "番割の取込")
+        hks.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self.btn_hks = _btn(hks, "番割全体表示から取込", self.on_import_hks)
+        self.btn_hks.pack(anchor="w")
+        status = ttk.Label(hks, textvariable=self.var_hks_status, style="Note.TLabel", justify="left")
+        status.pack(anchor="w", fill="x", pady=(8, 0))
+        hks.bind("<Configure>", lambda e: status.config(wraplength=max(e.width - 30, 160)), add="+")
+
+        # --- 対象の車両 ---
+        target = ui.Card(root, padding=12)
+        target.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(14, 0))
+        top = ttk.Frame(target)
+        top.pack(fill="x", pady=(0, 8))
+        ttk.Label(top, text="対象の車両", style="Section.TLabel").pack(side="left")
+        for text, value in (("登録済みの車両から選ぶ", "list"), ("1台だけ指定", "single")):
+            ttk.Radiobutton(top, text=text, value=value, variable=self.var_mode,
+                            command=self._refresh_mode).pack(side="left", padx=(16 if value == "list" else 8, 0))
+        self.list_tools = ttk.Frame(top)
+        self.list_tools.pack(side="right")
+        ttk.Button(self.list_tools, text="すべて外す", command=lambda: self._set_all(False)).pack(side="right")
+        ttk.Button(self.list_tools, text="すべて選ぶ", command=lambda: self._set_all(True)).pack(side="right", padx=6)
 
         # 検索対象に応じた切替エリア (リスト or 単一車両)
-        self.mode_area = ttk.Frame(root)
-        self.mode_area.pack(fill="both", expand=True, pady=4)
+        self.mode_area = ttk.Frame(target)
+        self.mode_area.pack(fill="both", expand=True)
 
         # --- リストモード: 登録済み車両 ---
-        self.box_list = ttk.LabelFrame(
-            self.mode_area, text="登録済み車両 (対象クリックでON/OFF / 行ダブルクリックで編集)",
-            padding=6)
-        toolbar = ttk.Frame(self.box_list)
-        toolbar.pack(fill="x")
-        ttk.Label(toolbar, text="※列タイトルをクリックで並び替え",
-                  foreground="#888").pack(side="left")
-        _btn(toolbar, "全て解除", lambda: self._set_all(False), style="secondary").pack(side="right", padx=2)
-        _btn(toolbar, "全てチェック", lambda: self._set_all(True), style="secondary").pack(side="right", padx=2)
-
-        # Treeview (対象/車両番号/顧客/現場/運転手/備考)
+        self.box_list = ttk.Frame(self.mode_area)
         tree_frame = ttk.Frame(self.box_list)
-        tree_frame.pack(fill="both", expand=True, pady=(4, 4))
+        tree_frame.pack(fill="both", expand=True)
         # 内部キーは互換性のため "dept" のまま (既存 config.json を壊さない)。
         # 表示上の扱いは「所属」をやめて「備考」(自由記入・空欄可) とする。
         cols = ("on", "number", "customer", "site", "driver", "dept")
         headers = {"on": "対象", "number": "車両番号", "customer": "顧客",
                    "site": "現場", "driver": "運転手", "dept": "備考"}
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8, selectmode="browse")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=7, selectmode="browse")
         for c in cols:
             self.tree.heading(c, text=headers[c], command=lambda col=c: self._sort_by(col))
-        self.tree.column("on", width=42, anchor="center", stretch=False)
-        # 車両番号列は全角2文字分ほど広げる (68 → 100)
-        self.tree.column("number", width=100, anchor="center", stretch=False)
-        self.tree.column("customer", width=150, stretch=False)
-        self.tree.column("site", width=180, stretch=True)
-        self.tree.column("driver", width=90, stretch=False)
-        self.tree.column("dept", width=100, stretch=False)
+        self.tree.column("on", width=52, anchor="center", stretch=False)
+        self.tree.column("number", width=96, anchor="center", stretch=False)
+        self.tree.column("customer", width=170, stretch=True)
+        self.tree.column("site", width=210, stretch=True)
+        self.tree.column("driver", width=100, stretch=False)
+        self.tree.column("dept", width=110, stretch=False)
+        self.tree.tag_configure("checked", background=CHECKED_ROW)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<Double-1>", self._on_tree_double)
 
-        # 削除のみ (新規登録は設定タブ)
         action = ttk.Frame(self.box_list)
-        action.pack(fill="x")
-        _btn(action, "選択行を削除", self._delete_selected, style="danger").pack(side="left")
-        ttk.Label(
-            action,
-            text="※新規登録は「設定」タブ / 顧客・現場・運転手はダブルクリックで編集",
-            foreground="#888",
-        ).pack(side="left", padx=8)
+        action.pack(fill="x", pady=(8, 0))
+        _btn(action, "選んだ行を削除", self._delete_selected).pack(side="left")
+        ttk.Label(action, text="「対象」をクリックでオン・オフ、行をダブルクリックで顧客・現場・運転手を編集、"
+                               "見出しで並べ替え。新しい車両は「設定」タブで登録します。",
+                  style="Note.TLabel").pack(side="left", padx=10)
 
         # --- 単一モード: 1台指定 ---
-        self.box_single = ttk.LabelFrame(self.mode_area, text="検索する車両 (1台のみ)", padding=8)
-        ttk.Label(self.box_single, text="車両番号(下4桁)").grid(row=0, column=0, sticky="w")
-        ttk.Entry(self.box_single, textvariable=self.var_single_num, width=10).grid(row=0, column=1, padx=4)
-        ttk.Label(self.box_single, text="備考").grid(row=0, column=2, sticky="w", padx=(12, 0))
-        self.cb_single_dept = ttk.Combobox(
-            self.box_single, textvariable=self.var_single_dept, width=18, values=[])
-        self.cb_single_dept.grid(row=0, column=3, padx=4)
-        ttk.Label(
-            self.box_single,
-            text="※この1台のみ検索します。登録リストには追加されません",
-            foreground="#888",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
-
-        # --- Hks番割の取込 (PDF名と按分レポートに顧客・現場を反映) ---
-        hks_row = ttk.Frame(root)
-        hks_row.pack(fill="x", pady=(0, 4))
-        self.btn_hks = _btn(hks_row, "番割全体表示から取込", self.on_import_hks, style="primary")
-        self.btn_hks.pack(side="left")
-        ttk.Label(hks_row, textvariable=self.var_hks_status, foreground="#888").pack(side="left", padx=8)
+        self.box_single = ttk.Frame(self.mode_area)
+        line = ttk.Frame(self.box_single)
+        line.pack(anchor="w", pady=(4, 0))
+        ttk.Label(line, text="車両番号（下4桁）").pack(side="left")
+        vcmd = (self.register(self._validate_plate_number), "%P")
+        ttk.Entry(line, textvariable=self.var_single_num, width=8, validate="key",
+                  validatecommand=vcmd).pack(side="left", padx=(6, 18))
+        ttk.Label(line, text="備考").pack(side="left")
+        self.cb_single_dept = ttk.Combobox(line, textvariable=self.var_single_dept, width=20, values=[])
+        self.cb_single_dept.pack(side="left", padx=6)
+        ttk.Label(self.box_single, text="この1台だけを検索します。登録済みの一覧には追加されません。",
+                  style="Note.TLabel").pack(anchor="w", pady=(8, 0))
 
         # --- 実行 ---
-        runrow = ttk.Frame(root)
-        runrow.pack(fill="x", pady=6)
-        if HAS_TTKB:
-            ttkb.Checkbutton(
-                runrow, text="ブラウザの動きを表示する",
-                variable=self.var_show, bootstyle="round-toggle",
-            ).pack(side="left")
-        else:
-            ttk.Checkbutton(
-                runrow, text="ブラウザの動きを表示する",
-                variable=self.var_show,
-            ).pack(side="left")
-        self.btn_run = _btn(runrow, "検索開始", self.on_run, style="success", width=14)
-        self.btn_run.pack(side="right", padx=4)
-        _btn(runrow, "保存先を開く", lambda: open_folder(self.var_dir.get()), style="secondary").pack(side="right", padx=4)
+        action = ttk.Frame(root)
+        action.grid(row=2, column=0, columnspan=2, sticky="we", pady=14)
+        self.btn_run = _btn(action, "検索開始", self.on_run, style="Big.Accent.TButton")
+        self.btn_run.pack(side="left")
+        self.progress = ttk.Progressbar(action, mode="determinate", length=240)
+        self.elapsed_label = ttk.Label(action, text="", style="Note.TLabel")
+        ttk.Checkbutton(action, text="ブラウザの動きを表示する", variable=self.var_show,
+                        style="Switch.TCheckbutton").pack(side="right")
 
-        # --- ステータス帯 (重要メッセージを色付きで表示) ---
-        self.status_bar = tk.Label(
-            root, text="準備しています...", anchor="w",
-            bg="#cce6ff", fg="#003366", padx=10, pady=6,
-            font=("", 10, "bold"),
-        )
-        self.status_bar.pack(fill="x", pady=(6, 2))
+        # --- 進行状況 (色分けしたログ) ---
+        log_card = ui.Card(root, "進行状況", padding=10)
+        log_card.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        frame = ttk.Frame(log_card)
+        frame.pack(fill="both", expand=True)
+        self.log_text = tk.Text(frame, height=6, state="disabled", wrap="none", font=(self.theme.mono, 10),
+                                bg=ui.CARD, fg=INK, relief="flat", bd=0, padx=8, pady=6, highlightthickness=0,
+                                spacing1=1, spacing3=1)
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
+        xbar = ttk.Scrollbar(frame, orient="horizontal", command=self.log_text.xview)
+        self.log_text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        ybar.pack(side="right", fill="y")
+        xbar.pack(side="bottom", fill="x")
+        self.log_text.pack(side="left", fill="both", expand=True)
+        bold = (self.theme.mono, 10, "bold")
+        self.log_text.tag_configure("head", foreground=ACCENT, font=bold, spacing1=8)
+        self.log_text.tag_configure("good", foreground=OK)
+        self.log_text.tag_configure("warn", foreground=WARN)
+        self.log_text.tag_configure("error", foreground=NG, font=bold)
+        self.log_text.tag_configure("step", foreground=MUTED)
 
-        # --- ログ ---
-        self.log_text = scrolledtext.ScrolledText(root, height=8, state="disabled")
-        self.log_text.pack(fill="both", expand=True, pady=(4, 0))
+        # --- 状態と結果 ---
+        bottom = ttk.Frame(root)
+        bottom.grid(row=4, column=0, columnspan=2, sticky="we", pady=(12, 0))
+        self.status_bar = ttk.Label(bottom, text="● 準備しています…", font=self.theme.font(10))
+        self.status_bar.pack(side="left", fill="x", expand=True)
+        ttk.Button(bottom, text="保存先を開く", command=lambda: open_folder(self.var_dir.get())).pack(side="right")
+        self.btn_report = ttk.Button(bottom, text="按分レポートを開く", command=self.open_report)
+        self.btn_report.pack(side="right", padx=6)
+        self._show_period()
+        self._refresh_report_button()
+
+    def _show_period(self):
+        """検索期間の下に、曜日つきの日付と日数を出す（読めない・範囲外なら赤）。"""
+        try:
+            d_from = self.parse_date(self.var_from.get(), "開始日")
+            d_to = self.parse_date(self.var_to.get(), "終了日")
+        except ValueError:
+            self.period_label.config(text="日付の形が違います（例 2026/06/01）", foreground=NG)
+            return
+        if d_from > d_to:
+            self.period_label.config(text="開始日が終了日より後になっています", foreground=NG)
+            return
+        if (datetime.date.today() - d_from).days > MAX_DAYS:
+            self.period_label.config(text=f"開始日が{MAX_DAYS}日より前です（照会できません）", foreground=NG)
+            return
+        days = (d_to - d_from).days + 1
+        text = ui.japanese_date(d_from) if days == 1 else \
+            f"{ui.japanese_date(d_from)} 〜 {ui.japanese_date(d_to)}（{days}日間）"
+        self.period_label.config(text=text, foreground=INK)
+
+    def _latest_report(self):
+        try:
+            files = list(Path(self.var_dir.get()).glob("按分レポート_*.csv"))
+        except OSError:
+            return None
+        return max(files, key=lambda p: p.stat().st_mtime) if files else None
+
+    def _refresh_report_button(self):
+        if hasattr(self, "btn_report"):
+            self.btn_report.configure(state="normal" if self._latest_report() else "disabled")
+
+    def open_report(self):
+        path = self._latest_report()
+        if path is None:
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(path))  # Excel などで開く
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as e:
+            self.log(f"按分レポートを開けませんでした: {e}")
 
     # =========================================================== 設定タブ
     def _build_settings_tab(self, root):
-        # --- ログイン情報 ---
-        box1 = ttk.LabelFrame(root, text="ログイン情報 (ETC利用照会サービス)", padding=8)
-        box1.pack(fill="x", pady=4)
-        ttk.Label(box1, text="ユーザーID").grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Entry(box1, textvariable=self.var_id, width=30).grid(row=0, column=1, sticky="w", padx=6)
-        ttk.Label(box1, text="パスワード").grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(box1, textvariable=self.var_pw, width=30, show="*").grid(row=1, column=1, sticky="w", padx=6)
-        ttk.Checkbutton(
-            box1, text="パスワードを保存する",
-            variable=self.var_save_pw,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        root.columnconfigure(1, weight=1)
+        root.rowconfigure(0, weight=1)
+        nav = ttk.Frame(root)
+        nav.grid(row=0, column=0, sticky="ns", padx=(0, 14))
+        holder = ui.Card(root, padding=18)
+        holder.grid(row=0, column=1, sticky="nsew")
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+        self.page_var = tk.StringVar(value="ログイン")
+        self.pages = {}
+        for name, build in (("ログイン", self._page_login), ("保存先", self._page_save),
+                            ("PDFへの書き込み", self._page_stamp), ("車両の登録", self._page_vehicles)):
+            ttk.Radiobutton(nav, text=name, value=name, variable=self.page_var, style="Nav.Toolbutton",
+                            command=self._show_page, width=16).pack(fill="x", pady=2)
+            page = ttk.Frame(holder)
+            page.grid(row=0, column=0, sticky="nsew")
+            ttk.Label(page, text=name, style="Page.TLabel").pack(anchor="w", pady=(0, 10))
+            build(page)
+            self.pages[name] = page
+        self._show_page()
 
-        # --- PDF保存先 ---
-        box3 = ttk.LabelFrame(root, text="PDF保存先", padding=8)
-        box3.pack(fill="x", pady=4)
-        ttk.Entry(box3, textvariable=self.var_dir, width=58).grid(row=0, column=0, sticky="we", padx=2)
-        ttk.Button(box3, text="参照...", command=self.browse_dir).grid(row=0, column=1, padx=4)
-        _btn(box3, "開く", lambda: open_folder(self.var_dir.get()), style="secondary").grid(row=0, column=2, padx=2)
-        box3.columnconfigure(0, weight=1)
+        bottom = ttk.Frame(root)
+        bottom.grid(row=1, column=0, columnspan=2, sticky="we", pady=(12, 0))
+        _btn(bottom, "保存", self._save_now, style="primary", width=10).pack(side="left")
+        self.save_status = ttk.Label(bottom, text="")
+        self.save_status.pack(side="left", padx=10)
+        ttk.Label(bottom, text="設定はこのPCに保存されます（「検索開始」を押したときも保存します）。",
+                  style="Note.TLabel").pack(side="right")
 
-        # --- 同名ファイルの扱い ---
-        dupbox = ttk.LabelFrame(root, text="同名のPDFがすでにあるとき", padding=8)
-        dupbox.pack(fill="x", pady=4)
+    def _show_page(self):
+        self.pages[self.page_var.get()].tkraise()
+
+    @staticmethod
+    def _note(parent, text):
+        """説明の文。画面の幅に合わせて折り返す。"""
+        label = ttk.Label(parent, text=text, style="Note.TLabel", wraplength=560, justify="left")
+        label.pack(anchor="w", fill="x", pady=(2, 0))
+        parent.bind("<Configure>", lambda e: label.config(wraplength=max(e.width - 8, 200)), add="+")
+        return label
+
+    def _page_login(self, page):
+        self._note(page, "ETC利用照会サービス（https://www.etc-meisai.jp/）のログイン情報です。")
+        grid = ttk.Frame(page)
+        grid.pack(anchor="w", pady=(10, 0))
+        ttk.Label(grid, text="ユーザーID").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(grid, textvariable=self.var_id, width=32).grid(row=0, column=1, sticky="w", padx=10, pady=4)
+        ttk.Label(grid, text="パスワード").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(grid, textvariable=self.var_pw, width=32, show="*").grid(row=1, column=1, sticky="w", padx=10, pady=4)
+        ttk.Checkbutton(page, text="パスワードを保存する", variable=self.var_save_pw,
+                        style="Switch.TCheckbutton").pack(anchor="w", pady=(10, 0))
+        self._note(page, "パスワードはこのPCの設定ファイルにそのまま保存されます。"
+                         "PCのログインパスワードなどで、ほかの人が使えないようにしてください。")
+
+    def _page_save(self, page):
+        ttk.Label(page, text="PDFの保存先", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        line = ttk.Frame(page)
+        line.pack(fill="x")
+        ttk.Entry(line, textvariable=self.var_dir).pack(side="left", fill="x", expand=True)
+        ttk.Button(line, text="参照…", command=self.browse_dir).pack(side="left", padx=(6, 0))
+        ttk.Button(line, text="開く", command=lambda: open_folder(self.var_dir.get())).pack(side="left", padx=(6, 0))
+        ttk.Label(page, text="同じ名前のPDFがすでにあるとき", style="Section.TLabel").pack(anchor="w", pady=(18, 6))
         for label, val in (
-            ("連番を付けて保存 (例: 20260610_1499_2.pdf)", "rename"),
+            ("連番を付けて保存する（例 20260610_1499_2.pdf）", "rename"),
             ("上書きする", "overwrite"),
-            ("スキップする (ダウンロードしない)", "skip"),
+            ("スキップする（ダウンロードしない）", "skip"),
         ):
-            ttk.Radiobutton(dupbox, text=label, value=val, variable=self.var_dup).pack(anchor="w")
+            ttk.Radiobutton(page, text=label, value=val, variable=self.var_dup).pack(anchor="w", pady=2)
 
-        # --- PDFへの書き込み ---
-        stampbox = ttk.LabelFrame(root, text="PDFへの書き込み (明細PDF下部に追記する項目)", padding=8)
-        stampbox.pack(fill="x", pady=4)
-        ttk.Checkbutton(stampbox, text="顧客名", variable=self.var_stamp_customer).pack(side="left", padx=6)
-        ttk.Checkbutton(stampbox, text="現場名", variable=self.var_stamp_site).pack(side="left", padx=6)
-        ttk.Checkbutton(stampbox, text="運転手", variable=self.var_stamp_driver).pack(side="left", padx=6)
-        ttk.Label(stampbox, text="文字サイズ").pack(side="left", padx=(14, 2))
-        ttk.Spinbox(stampbox, from_=6, to=72, increment=1, width=5,
-                    textvariable=self.var_stamp_size).pack(side="left")
-        ttk.Label(stampbox, text="pt").pack(side="left", padx=(2, 0))
-        ttk.Label(stampbox, text="※情報がない車両・複数日検索では書き込みません",
-                  foreground="#888").pack(side="left", padx=10)
+    def _page_stamp(self, page):
+        self._note(page, "番割を取り込んだ1日分の検索では、明細PDFの下に顧客・現場・運転手を書き込みます。"
+                         "情報がない車両や、複数日の検索では書き込みません。")
+        for text, var in (("顧客名", self.var_stamp_customer), ("現場名", self.var_stamp_site),
+                          ("運転手", self.var_stamp_driver)):
+            ttk.Checkbutton(page, text=text, variable=var, style="Switch.TCheckbutton").pack(anchor="w", pady=4)
+        line = ttk.Frame(page)
+        line.pack(anchor="w", pady=(10, 0))
+        ttk.Label(line, text="文字の大きさ").pack(side="left")
+        ttk.Spinbox(line, from_=6, to=72, increment=1, width=5, textvariable=self.var_stamp_size).pack(
+            side="left", padx=6)
+        ttk.Label(line, text="pt").pack(side="left")
 
-        # --- 車両の新規登録 ---
-        regbox = ttk.LabelFrame(root, text="車両の新規登録", padding=8)
-        regbox.pack(fill="x", pady=4)
-        # 車両番号は必須 → ラベルに赤い「*」を添える
-        num_lbl = ttk.Frame(regbox)
-        num_lbl.grid(row=0, column=0, sticky="w")
-        ttk.Label(num_lbl, text="車両番号(下4桁)").pack(side="left")
-        ttk.Label(num_lbl, text="*", foreground="red").pack(side="left", padx=(2, 0))
+    def _page_vehicles(self, page):
+        ttk.Label(page, text="新しい車両を登録する", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        line = ttk.Frame(page)
+        line.pack(anchor="w")
+        ttk.Label(line, text="車両番号（下4桁）").pack(side="left")
+        ttk.Label(line, text="*", style="Required.TLabel").pack(side="left", padx=(2, 0))
         vcmd = (self.register(self._validate_plate_number), "%P")
-        ttk.Entry(regbox, textvariable=self.var_reg_num, width=10,
-                  validate="key", validatecommand=vcmd).grid(row=0, column=1, padx=4)
-        ttk.Label(regbox, text="備考").grid(row=0, column=2, sticky="w", padx=(12, 0))
-        self.cb_reg_dept = ttk.Combobox(regbox, textvariable=self.var_reg_dept, width=18, values=[])
-        self.cb_reg_dept.grid(row=0, column=3, padx=4)
-        _btn(regbox, "登録", self._register_vehicle, style="primary").grid(row=0, column=4, padx=8)
-        ttk.Label(
-            regbox,
-            text="※登録した車両は「メイン」タブの一覧に表示されます。\n"
-                 "  変更したいときは一覧から削除してから再登録してください。",
-            foreground="#888",
-            justify="left",
-        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
-
-        # --- 車両リストの受け渡し ---
-        iobox = ttk.LabelFrame(root, text="車両リストの受け渡し (別PCへの配布用)", padding=8)
-        iobox.pack(fill="x", pady=4)
-        _btn(iobox, "CSVに書き出す", self._export_vehicles, style="secondary").pack(side="left", padx=4)
-        _btn(iobox, "CSVを読み込む", self._import_vehicles, style="secondary").pack(side="left", padx=4)
-        ttk.Label(
-            iobox,
-            text="形式: 1行目ヘッダ「備考,車両番号」。Excelでの編集・一括作成も可",
-            foreground="#888",
-        ).pack(side="left", padx=8)
-
-        # 設定保存ボタン
-        save_row = ttk.Frame(root)
-        save_row.pack(fill="x", pady=8)
-        _btn(save_row, "設定を保存", self._save_now, style="primary").pack(side="right")
+        ttk.Entry(line, textvariable=self.var_reg_num, width=8, validate="key",
+                  validatecommand=vcmd).pack(side="left", padx=(6, 18))
+        ttk.Label(line, text="備考").pack(side="left")
+        self.cb_reg_dept = ttk.Combobox(line, textvariable=self.var_reg_dept, width=20, values=[])
+        self.cb_reg_dept.pack(side="left", padx=6)
+        _btn(line, "登録", self._register_vehicle, style="primary").pack(side="left", padx=(6, 0))
+        self._note(page, "登録した車両は「ダウンロード」タブの一覧に出ます。"
+                         "番号や備考を変えるときは、一覧から削除してから登録し直してください。")
+        ttk.Label(page, text="車両の一覧をほかのPCに渡す", style="Section.TLabel").pack(anchor="w", pady=(18, 6))
+        line = ttk.Frame(page)
+        line.pack(anchor="w")
+        ttk.Button(line, text="CSVに書き出す", command=self._export_vehicles).pack(side="left")
+        ttk.Button(line, text="CSVを読み込む", command=self._import_vehicles).pack(side="left", padx=6)
+        self._note(page, "形式は1行目が「備考,車両番号」の CSV です。Excel で作ってまとめて読み込むこともできます。")
 
     # ============================================================ 共通処理
     def _refresh_mode(self):
         if self.var_mode.get() == "list":
             self.box_single.pack_forget()
             self.box_list.pack(in_=self.mode_area, fill="both", expand=True)
+            self.list_tools.pack(side="right")
         else:
             self.box_list.pack_forget()
+            self.list_tools.pack_forget()
             self.box_single.pack(in_=self.mode_area, fill="x")
             self.cb_single_dept["values"] = self._depts()
 
@@ -644,7 +701,8 @@ class App(_BaseWindow):
             for idx in order:
                 v = self.vehicles[idx]
                 mark = "☑" if v.get("enabled", True) else "☐"
-                self.tree.insert("", "end", iid=str(idx), values=(
+                tags = ("checked",) if v.get("enabled", True) else ()
+                self.tree.insert("", "end", iid=str(idx), tags=tags, values=(
                     mark, v.get("number", ""),
                     self._ellipsis(v.get("customer", ""), 14),
                     self._ellipsis(v.get("site", ""), 18),
@@ -881,11 +939,11 @@ class App(_BaseWindow):
                 f"({', '.join(dates) or '日付不明'} / 取込{self.hks_imported_at})"
             )
         else:
-            self.var_hks_status.set("未取込 (業務システムの番割予定表を開いた状態で押してください)")
+            self.var_hks_status.set("未取込。Hksの番割全体表示（番割予定表）を開いてから押すと、"
+                                    "車両ごとの顧客・現場・運転手を PDF名と按分レポートに入れます。")
 
     def on_import_hks(self):
-        self.btn_hks.configure(state="disabled", text="取込中...")
-        _set_btn_style(self.btn_hks, "warning")
+        self.btn_hks.configure(state="disabled", text="取込中…")
         # 取込中は検索開始を押せないようにする
         self._hks_importing = True
         self.btn_run.configure(state="disabled")
@@ -1003,7 +1061,6 @@ class App(_BaseWindow):
             finally:
                 def restore():
                     self.btn_hks.configure(state="normal", text="番割全体表示から取込")
-                    _set_btn_style(self.btn_hks, "primary")
                     self._update_hks_status()
                     # 取込が終わったら検索開始を押せる状態に戻す
                     self._hks_importing = False
@@ -1213,7 +1270,8 @@ class App(_BaseWindow):
     def _save_now(self):
         save_config(self._current_config())
         self._refresh_settings_badge()
-        messagebox.showinfo("保存", "設定を保存しました")
+        self._refresh_report_button()
+        self.save_status.configure(text=f"✓ 保存しました（{datetime.datetime.now():%H:%M}）", style="Ok.TLabel")
 
     def _current_config(self):
         return {
@@ -1239,21 +1297,13 @@ class App(_BaseWindow):
         }
 
     def _make_date_input(self, parent, var):
-        """日付入力欄。直接入力できる Entry と、カレンダーを開く📅ボタンを並べる。
-
-        旧実装の tkcalendar.DateEntry は枠内でマウスカーソルが消え、
-        カレンダーを開くクリック範囲も狭かったため、両立できるよう作り替えた。
-        tkcalendar が無い環境では Entry だけにフォールバックする。
-        """
+        """日付入力欄。直接入力できる Entry と、カレンダーを開くボタンを並べる。"""
         frame = ttk.Frame(parent)
-        entry = ttk.Entry(frame, textvariable=var, width=11)
+        entry = ttk.Entry(frame, textvariable=var, width=11, font=self.theme.font(11))
         entry.pack(side="left")
-        if HAS_DATEENTRY:
-            # 押しやすい大きさのボタンでカレンダーを開く
-            ttk.Button(
-                frame, text="📅", width=3,
-                command=lambda: self._open_calendar_popup(entry, var),
-            ).pack(side="left", padx=(2, 0))
+        button = ttk.Button(frame, text="カレンダー")
+        button.configure(command=lambda: self._open_calendar_popup(button, var))
+        button.pack(side="left", padx=(4, 0))
         return frame
 
     def _open_calendar_popup(self, anchor, var):
@@ -1262,37 +1312,8 @@ class App(_BaseWindow):
             cur = self.parse_date(var.get(), "")
         except Exception:
             cur = datetime.date.today()
-
-        top = tk.Toplevel(self)
-        # 位置確定までは隠しておく (一瞬左上に出てから移動する見え方を防ぐ)
-        top.withdraw()
-        top.transient(self)
-        top.title("日付を選択")
-        top.resizable(False, False)
-        cal = _TkCalendar(
-            top, selectmode="day", locale="ja_JP",
-            date_pattern="yyyy/mm/dd", showweeknumbers=False,
-            year=cur.year, month=cur.month, day=cur.day,
-        )
-        cal.pack(padx=8, pady=8)
-
-        def choose(_event=None):
-            var.set(cal.get_date())
-            top.destroy()
-
-        # 日付をダブルクリック / 「決定」/ Enter で確定 (単クリックの月移動では閉じない)
-        cal.bind("<Double-1>", choose)
-        ttk.Button(top, text="決定", command=choose).pack(pady=(0, 8))
-        top.bind("<Return>", choose)
-        top.bind("<Escape>", lambda e: top.destroy())
-
-        # anchor の真下に配置してから表示する
-        top.update_idletasks()
-        x = anchor.winfo_rootx()
-        y = anchor.winfo_rooty() + anchor.winfo_height()
-        top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        top.deiconify()
-        top.grab_set()
+        earliest = datetime.date.today() - datetime.timedelta(days=MAX_DAYS)
+        ui.CalendarPopup(self, anchor, cur, lambda d: var.set(d.strftime("%Y/%m/%d")), self.theme, earliest)
 
     # 期間ショートカット
     def set_this_month(self):
@@ -1330,27 +1351,23 @@ class App(_BaseWindow):
                 "今すぐ設定タブを開きますか？",
             ):
                 self.nb.select(self.tab_settings)
+                self.page_var.set("ログイン")
+                self._show_page()
 
     def _refresh_settings_badge(self):
         """ログイン情報が未入力なら設定タブのラベルに ● を付ける"""
         need = not (self.var_id.get().strip() and self.var_pw.get())
         try:
-            self.nb.tab(self.tab_settings, text="  設定 ●  " if need else "  設定  ")
+            self.nb.tab(self.tab_settings, text="   設定 ●   " if need else "   設定   ")
         except Exception:
             pass
 
     def set_status(self, text, kind="info"):
         """ステータス帯を更新する。kind: info / busy / success / warning / error"""
-        palette = {
-            "info":    ("#cce6ff", "#003366"),
-            "busy":    ("#fff3cd", "#856404"),
-            "success": ("#d4edda", "#155724"),
-            "warning": ("#fff3cd", "#856404"),
-            "error":   ("#f8d7da", "#721c24"),
-        }
-        bg, fg = palette.get(kind, palette["info"])
+        color = {"info": ACCENT, "busy": WARN, "success": OK, "warning": WARN, "error": NG}.get(kind, ACCENT)
+
         def apply():
-            self.status_bar.configure(text=text, bg=bg, fg=fg)
+            self.status_bar.configure(text=f"● {text}", foreground=color)
         self.after(0, apply)
 
     def log(self, msg):
@@ -1361,12 +1378,28 @@ class App(_BaseWindow):
             while True:
                 msg = self.log_queue.get_nowait()
                 self.log_text.configure(state="normal")
-                self.log_text.insert("end", msg + "\n")
+                self.log_text.insert("end", msg + "\n", self._log_tag(msg))
                 self.log_text.see("end")
                 self.log_text.configure(state="disabled")
         except queue.Empty:
             pass
         self.after(100, self.poll_log)
+
+    @staticmethod
+    def _log_tag(msg):
+        """ログの1行の色（見出し＝青、保存できた＝緑、注意＝橙、エラー＝赤、細かい経過＝灰）。"""
+        text = str(msg)
+        if text.startswith("==="):
+            return "head"
+        if any(w in text for w in ("エラー", "失敗", "できません", "見つかりません")):
+            return "error"
+        if text.lstrip().startswith(("⚠", "※")) or "不一致" in text or "除外" in text:
+            return "warn"
+        if any(w in text for w in ("保存しました", "完了", "取り込みました", "反映", "実行できる状態")):
+            return "good"
+        if text.startswith("  "):
+            return "step"
+        return ""
 
     def parse_date(self, s, label):
         for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y%m%d"):
@@ -1460,13 +1493,24 @@ class App(_BaseWindow):
         }
 
         self.running = True
-        self.btn_run.configure(state="disabled", text=f"検索中 0/{len(targets)}")
-        self.set_status(f"ETC明細をダウンロード中... ({len(targets)} 台)", kind="busy")
+        self.btn_run.configure(state="disabled", text="検索中…")
+        self.btn_hks.configure(state="disabled")
+        self.nb.tab(self.tab_settings, state="disabled")  # 検索中に設定を変えないようにする
+        self.progress.configure(maximum=len(targets), value=0)
+        self.progress.pack(side="left", padx=(16, 8))
+        self.elapsed_label.pack(side="left")
+        self._started_at = datetime.datetime.now().timestamp()
+        self._progress_text = f"0 / {len(targets)} 台"
+        self._tick()
+        self.set_status(f"ETC明細をダウンロードしています（{len(targets)} 台）…", kind="busy")
         self.log(f"=== 開始: {d_from} 〜 {d_to} / 対象 {len(targets)} 台 ===")
 
         def on_progress(done, total):
             # ワーカースレッドから呼ばれるので UI 更新は after で本スレッドに戻す
-            self.after(0, lambda: self.btn_run.configure(text=f"検索中 {done}/{total}"))
+            def apply():
+                self.progress.configure(maximum=total, value=done)
+                self._progress_text = f"{done} / {total} 台"
+            self.after(0, apply)
 
         def worker():
             try:
@@ -1504,13 +1548,28 @@ class App(_BaseWindow):
         if getattr(self, "_chromium_ready", False):
             self.btn_run.configure(state="normal", text="検索開始")
 
+    def _tick(self):
+        """検索中の経過時間と件数（タスクバーの題名にも出す）。"""
+        if not self.running:
+            return
+        sec = int(datetime.datetime.now().timestamp() - self._started_at)
+        self.elapsed_label.configure(text=f"経過 {sec // 60}:{sec % 60:02d}　{self._progress_text}")
+        self.title(f"{TITLE} - {self._progress_text}")
+        self.after(1000, self._tick)
+
     def on_done(self):
         self.running = False
+        self.progress.pack_forget()
+        self.elapsed_label.pack_forget()
+        self.title(TITLE)
+        self.btn_hks.configure(state="normal")
+        self.nb.tab(self.tab_settings, state="normal")
         self._restore_run_button()
+        self._refresh_report_button()
         if getattr(self, "_last_error", None):
             self.set_status(f"処理中にエラーが発生しました: {self._last_error}", kind="error")
         else:
-            self.set_status("完了しました。保存先フォルダで確認してください", kind="success")
+            self.set_status("完了しました。保存先フォルダーで確認してください", kind="success")
 
 
 if __name__ == "__main__":

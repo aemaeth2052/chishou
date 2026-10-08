@@ -1,0 +1,200 @@
+# -*- coding: utf-8 -*-
+"""画面の見た目（番割集計と同じデザイン）。
+
+Windows 11 風のテーマ（sv-ttk）と日本語の読みやすいフォント、白いカードの区画、
+カレンダー（日曜始まり・土日の色分け）を用意する。sv-ttk が無い環境では標準の clam テーマに色を付けて代わりにする。
+"""
+
+from __future__ import annotations
+
+import calendar
+import datetime
+import tkinter as tk
+from tkinter import ttk
+from tkinter import font as tkfont
+
+# 色（Windows 11 の配色に合わせる）
+ACCENT = "#005fb8"
+HEADER_BG = "#0b3a66"
+HEADER_SUB = "#b8d3ee"
+INK = "#1c1c1c"
+MUTED = "#6e6e6e"
+CARD = "#ffffff"
+SUNDAY, SATURDAY, OTHER_MONTH = "#c42b1c", "#005fb8", "#b4b4b4"
+OK, NG, WARN = "#0f7b0f", "#c42b1c", "#9d5d00"
+CHECKED_ROW = "#e6f3fb"  # 一覧でチェックした行の色
+
+UI_FONTS = ("Yu Gothic UI", "Meiryo UI", "Meiryo", "MS UI Gothic")
+MONO_FONTS = ("BIZ UDGothic", "BIZ UDゴシック", "MS Gothic", "ＭＳ ゴシック")
+WEEKDAYS = ("日", "月", "火", "水", "木", "金", "土")  # 日曜始まり
+
+
+def weekday_name(d: datetime.date) -> str:
+    return "月火水木金土日"[d.weekday()]
+
+
+def japanese_date(d: datetime.date) -> str:
+    return f"{d.year}年{d.month}月{d.day}日（{weekday_name(d)}）"
+
+
+class Theme:
+    """Windows 11 風のテーマ（sv-ttk）を当て、日本語の読みやすいフォントにそろえる。"""
+
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        families = set(tkfont.families(root))
+        self.ui = next((f for f in UI_FONTS if f in families), None)
+        self.mono = next((f for f in MONO_FONTS if f in families), "TkFixedFont")
+        self.modern = self._apply_sun_valley()
+        if not self.modern:
+            self._apply_fallback()
+        if self.ui:
+            for name in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont", "TkCaptionFont",
+                         "SunValleyCaptionFont", "SunValleyBodyFont", "SunValleyBodyStrongFont",
+                         "SunValleyBodyLargeFont", "SunValleySubtitleFont", "SunValleyTitleFont"):
+                try:
+                    tkfont.nametofont(name, root).configure(family=self.ui)
+                except tk.TclError:
+                    pass
+        style = ttk.Style(root)
+        style.configure("Big.Accent.TButton", font=self.font(13, "bold"), padding=(24, 10))
+        style.configure("Note.TLabel", foreground=MUTED, font=self.font(9))
+        style.configure("Section.TLabel", font=self.font(12, "bold"))
+        style.configure("Page.TLabel", font=self.font(15, "bold"))
+        style.configure("Ok.TLabel", foreground=OK, font=self.font(10, "bold"))
+        style.configure("Ng.TLabel", foreground=NG, font=self.font(10, "bold"))
+        style.configure("Required.TLabel", foreground=NG)
+        style.configure("Weekday.TLabel", font=self.font(11, "bold"))
+        style.configure("Nav.Toolbutton", anchor="w", padding=(14, 8))
+        style.map("Nav.Toolbutton", foreground=[("selected", ACCENT)], font=[("selected", self.font(10, "bold"))])
+        style.configure("Treeview", rowheight=28)
+
+    def font(self, size: int, weight: str = "normal") -> tuple:
+        return (self.ui or "TkDefaultFont", size, weight)
+
+    def _apply_sun_valley(self) -> bool:
+        try:
+            import sv_ttk
+            sv_ttk.set_theme("light", self.root)
+            return True
+        except Exception:
+            return False
+
+    def _apply_fallback(self) -> None:
+        """sv-ttk が無いときの代わり（標準の clam テーマに色を付ける）。"""
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        self.root.configure(bg="#fafafa")
+        style.configure(".", background="#fafafa")
+        style.configure("Card.TFrame", background="#fafafa", relief="solid", borderwidth=1)
+        style.configure("Accent.TButton", background=ACCENT, foreground="white")
+        style.map("Accent.TButton", background=[("active", "#1a6fc4"), ("disabled", "#9cbbe0")])
+        style.layout("Switch.TCheckbutton", style.layout("TCheckbutton"))
+
+
+class Card(ttk.Frame):
+    """白い角丸の区画。見出しをつけられる。中の部品は ttk.Frame（Card を重ねると枠が二重になる）。"""
+
+    def __init__(self, master: tk.Misc, title: str = "", padding: int = 14) -> None:
+        super().__init__(master, style="Card.TFrame", padding=padding)
+        if title:
+            ttk.Label(self, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 8))
+
+
+def header_band(root: tk.Misc, theme: Theme, title: str, subtitle: str) -> tk.Frame:
+    """画面上の濃紺の帯（題名・説明・今日の日付）。"""
+    head = tk.Frame(root, bg=HEADER_BG, padx=22, pady=14)
+    left = tk.Frame(head, bg=HEADER_BG)
+    left.pack(side="left")
+    tk.Label(left, text=title, bg=HEADER_BG, fg="white", font=theme.font(19, "bold")).pack(anchor="w")
+    tk.Label(left, text=subtitle, bg=HEADER_BG, fg=HEADER_SUB, font=theme.font(10)).pack(anchor="w")
+    tk.Label(head, text=japanese_date(datetime.date.today()), bg=HEADER_BG, fg="white",
+             font=theme.font(12)).pack(side="right", anchor="e")
+    return head
+
+
+def center_on(win: tk.Toplevel, parent: tk.Misc, top: int | None = None) -> None:
+    """画面を親ウィンドウの中央（top を渡すと、親の上端から top の位置）に出す。"""
+    win.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - win.winfo_reqwidth()) // 2
+    y = parent.winfo_rooty() + (top if top is not None else (parent.winfo_height() - win.winfo_reqheight()) // 3)
+    win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+
+class CalendarPopup(tk.Toplevel):
+    """日付をカレンダーから選ぶ小さな画面。日をクリックすると on_pick(日付) を呼んで閉じる。"""
+
+    def __init__(self, master: tk.Misc, anchor: tk.Widget, initial: datetime.date, on_pick, theme: Theme,
+                 earliest: datetime.date | None = None) -> None:
+        super().__init__(master)
+        self.withdraw()
+        self.title("日付を選ぶ")
+        self.resizable(False, False)
+        self.transient(master.winfo_toplevel())
+        self.configure(bg=CARD)
+        self.theme = theme
+        self.on_pick = on_pick
+        self.selected = initial
+        self.earliest = earliest  # これより前の日は薄く表示する（ETC利用照会サービスは過去62日まで）
+        self.year, self.month = initial.year, initial.month
+
+        head = tk.Frame(self, bg=CARD, padx=12, pady=10)
+        head.pack(fill="x")
+        ttk.Button(head, text="◀", width=3, command=lambda: self._move(-1)).pack(side="left")
+        self.caption = tk.Label(head, bg=CARD, fg=INK, font=theme.font(13, "bold"))
+        self.caption.pack(side="left", expand=True, fill="x")
+        ttk.Button(head, text="▶", width=3, command=lambda: self._move(1)).pack(side="right")
+
+        self.days = tk.Frame(self, bg=CARD, padx=12)
+        self.days.pack()
+
+        foot = tk.Frame(self, bg=CARD, padx=12, pady=10)
+        foot.pack(fill="x")
+        ttk.Button(foot, text="今日", command=lambda: self._pick(datetime.date.today())).pack(side="left")
+        ttk.Button(foot, text="閉じる", command=self.destroy).pack(side="right")
+
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<Prior>", lambda _e: self._move(-1))  # PageUp: 前の月
+        self.bind("<Next>", lambda _e: self._move(1))  # PageDown: 次の月
+        self._draw()
+        self.update_idletasks()
+        self.geometry(f"+{anchor.winfo_rootx()}+{anchor.winfo_rooty() + anchor.winfo_height() + 4}")
+        self.deiconify()
+        self.grab_set()
+        self.focus_set()
+
+    def _move(self, delta: int) -> None:
+        m = self.month - 1 + delta
+        self.year, self.month = self.year + m // 12, m % 12 + 1
+        self._draw()
+
+    def _draw(self) -> None:
+        for w in self.days.winfo_children():
+            w.destroy()
+        self.caption.config(text=f"{self.year}年 {self.month}月")
+        for col, name in enumerate(WEEKDAYS):
+            fg = SUNDAY if col == 0 else SATURDAY if col == 6 else MUTED
+            tk.Label(self.days, text=name, fg=fg, bg=CARD, width=4, font=self.theme.font(9)).grid(
+                row=0, column=col, pady=(0, 4))
+        today = datetime.date.today()
+        weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(self.year, self.month)  # 日曜始まり
+        for row, week in enumerate(weeks, start=1):
+            for col, d in enumerate(week):
+                outside = d.month != self.month or (self.earliest is not None and d < self.earliest) or d > today
+                fg = OTHER_MONTH if outside else SUNDAY if col == 0 else SATURDAY if col == 6 else INK
+                bg, weight = CARD, "normal"
+                if d == self.selected:
+                    fg, bg, weight = "white", ACCENT, "bold"
+                elif d == today:
+                    bg, weight = "#dbeafb", "bold"
+                cell = tk.Label(self.days, text=str(d.day), width=4, height=1, fg=fg, bg=bg, cursor="hand2",
+                                font=self.theme.font(11, weight), pady=5)
+                cell.grid(row=row, column=col, padx=1, pady=1)
+                cell.bind("<Button-1>", lambda _e, d=d: self._pick(d))
+                if d != self.selected:  # マウスを乗せると薄く色をつける
+                    cell.bind("<Enter>", lambda _e, c=cell: c.config(bg="#e8f1fb"))
+                    cell.bind("<Leave>", lambda _e, c=cell, b=bg: c.config(bg=b))
+
+    def _pick(self, d: datetime.date) -> None:
+        self.on_pick(d)
+        self.destroy()
