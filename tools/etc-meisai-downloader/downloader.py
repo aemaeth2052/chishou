@@ -17,7 +17,9 @@ logs/error_* のスクリーンショットとHTMLを確認して修正する。
 import base64
 import datetime
 import re
+import time
 import unicodedata
+from collections import defaultdict
 from pathlib import Path
 
 # paths を最初にimportして PLAYWRIGHT_BROWSERS_PATH を設定してから playwright を読み込む
@@ -392,13 +394,22 @@ def run(login_id, password, date_from, date_to, save_dir,
         context = browser.new_context(locale="ja-JP")
         page = context.new_page()
         page.set_default_timeout(30000)
+        # どこに時間がかかったか（秒）。最後に1台あたりの内訳をログに出す（高速化の手がかり）
+        spent = defaultdict(float)
+
+        def timed(name, func, *args):
+            t = time.perf_counter()
+            try:
+                return func(*args)
+            finally:
+                spent[name] += time.perf_counter() - t
 
         def process(v):
             """1台分の処理。dict(status/detail/fare) を返す"""
             number = str(v.get("number") or "").strip()
-            _goto_search_form(page)
-            _set_search_conditions(page, number, date_from, date_to)
-            _submit_search(page)
+            timed("検索画面", _goto_search_form, page)
+            timed("条件の入力", _set_search_conditions, page, number, date_from, date_to)
+            timed("検索", _submit_search, page)
             fare = _total_fare(page)
 
             # ファイル名: 日付_車両ナンバー[_顧客_現場].pdf
@@ -422,7 +433,7 @@ def run(login_id, password, date_from, date_to, save_dir,
                             "detail": f"同名ファイルあり: {dest.name}", "fare": fare}
                 if dup_mode == "rename":
                     dest = _unique_path(dest)
-            if _download_pdf(page, dest, log):
+            if timed("PDFの取得", _download_pdf, page, dest, log):
                 # 顧客・現場・運転手をPDF下部に書き込み (設定で項目選択)
                 if info and stamp_opts and any(
                         stamp_opts.get(k) for k in ("customer", "site", "driver")):
@@ -438,8 +449,9 @@ def run(login_id, password, date_from, date_to, save_dir,
             return {"status": "no_data", "detail": "", "fare": fare}
 
         results = {}  # index -> {"status","detail","fare"}
+        started = time.perf_counter()
         try:
-            _login(page, login_id, password, log)
+            timed("ログイン", _login, page, login_id, password, log)
 
             def label_of(v):
                 name = (v.get("name") or "").strip()
@@ -453,6 +465,7 @@ def run(login_id, password, date_from, date_to, save_dir,
             for i, v in enumerate(targets):
                 notify(i + 1, len(targets))
                 log(f"[{i + 1}/{len(targets)}] {label_of(v)}: 検索中 ({date_from} 〜 {date_to})")
+                t_vehicle = time.perf_counter()
                 try:
                     r = process(v)
                     results[i] = r
@@ -461,7 +474,7 @@ def run(login_id, password, date_from, date_to, save_dir,
                         "no_data": "  → 期間内の利用データなし",
                         "skipped": f"  → {r['detail']} のためスキップ",
                     }
-                    log(msgs[r["status"]])
+                    log(f"{msgs[r['status']]}（{time.perf_counter() - t_vehicle:.1f}秒）")
                 except Exception as e:
                     results[i] = {"status": "failed", "detail": str(e), "fare": None}
                     log(f"  → 失敗: {e}")
@@ -495,6 +508,12 @@ def run(login_id, password, date_from, date_to, save_dir,
                 log("ログアウトしました")
             except Exception:
                 pass
+            total = time.perf_counter() - started
+            n = len(targets)
+            parts = " / ".join(f"{k} {spent[k] / n:.1f}秒" for k in ("検索画面", "条件の入力", "検索", "PDFの取得")
+                               if spent.get(k))
+            log(f"所要時間: {int(total // 60)}分{int(total % 60)}秒（ログイン {spent['ログイン']:.0f}秒・"
+                f"1台あたり {(total - spent['ログイン']) / n:.1f}秒: {parts}）")
         except LoginFailedError:
             # ID/パスワード誤り。原因が明確なので画面ダンプ(error_*)は残さない
             raise

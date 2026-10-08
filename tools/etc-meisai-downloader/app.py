@@ -1395,7 +1395,7 @@ class App(tk.Tk):
             return "error"
         if text.lstrip().startswith(("⚠", "※")) or "不一致" in text or "除外" in text:
             return "warn"
-        if any(w in text for w in ("保存しました", "完了", "取り込みました", "反映", "実行できる状態")):
+        if any(w in text for w in ("保存しました", "→ 保存", "完了", "取り込みました", "反映", "実行できる状態")):
             return "good"
         if text.startswith("  "):
             return "step"
