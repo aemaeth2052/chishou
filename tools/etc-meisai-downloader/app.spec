@@ -56,11 +56,9 @@ def _pywin32_mfc_binaries():
 pywin32_mfc_binaries = _pywin32_mfc_binaries()
 
 hiddenimports = (
-    collect_submodules("ttkbootstrap")
+    collect_submodules("sv_ttk")
     + collect_submodules("pypdf")
     + collect_submodules("reportlab")
-    + collect_submodules("tkcalendar")
-    + collect_submodules("babel")
     + collect_submodules("PIL")
     + playwright_hidden
     + greenlet_hidden
@@ -79,10 +77,8 @@ binaries = (
 )
 
 datas = (
-    collect_data_files("ttkbootstrap")
+    collect_data_files("sv_ttk")
     + collect_data_files("reportlab")
-    + collect_data_files("tkcalendar")
-    + collect_data_files("babel")
     + playwright_datas + greenlet_datas
     + pywinauto_datas + comtypes_datas
     + icon_datas

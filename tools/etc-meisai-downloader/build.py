@@ -69,7 +69,7 @@ def check_deps(py):
     ビルド前に止めて原因を明確にする。"""
     code = ("import greenlet._greenlet, playwright, pywinauto, comtypes, "
             "pywintypes, pythoncom, win32api, win32ui, win32clipboard, "
-            "PIL, reportlab, tkcalendar, ttkbootstrap")
+            "PIL, reportlab, sv_ttk")
     res = subprocess.run([py, "-c", code],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if res.returncode != 0:
