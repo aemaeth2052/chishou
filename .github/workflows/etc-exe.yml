@@ -1,9 +1,12 @@
 # ETC明細ダウンローダーを Windows 上で確認し、配布用の exe（フォルダごと）を作る。
-# できた exe は、このワークフローの実行結果ページの「Artifacts」からダウンロードできる。
+# できた exe は、このワークフローの実行結果ページの「Artifacts」からダウンロードできる（保存は 7 日間。GitHub の無料枠 0.5 GB を使い切らないため）。
+# 自動で作るのはこのブランチへの push のときだけ。ほかのブランチで試すときは Actions の「Run workflow」で手動実行する。
 name: ETC明細ダウンローダー exe
 
 on:
   push:
+    branches:
+      - claude/etc-gui-redesign
     paths:
       - "tools/etc-meisai-downloader/**"
       - ".github/workflows/etc-exe.yml"
@@ -47,4 +50,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ETC明細ダウンローダー
+          retention-days: 7
           path: tools/etc-meisai-downloader/dist/
